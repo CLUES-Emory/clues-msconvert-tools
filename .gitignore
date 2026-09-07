@@ -1,0 +1,14 @@
+# Instrument data & generated output — never publish
+GC-HRMS_Raw_Files/
+Method_Reports/
+*.raw
+*_method_report.txt
+
+# Unrelated tooling kept in the working folder
+GC-HRMS_parallel_msconvert_v1.8.ps1
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
