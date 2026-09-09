@@ -1,5 +1,17 @@
 # thermo-raw-method-report
 
+Helper scripts for reading metadata out of Thermo `.raw` files, used by the
+CLUES file-conversion workflow (pulled from this repo at run time).
+
+| Script | Purpose |
+|--------|---------|
+| `instrument_method_report.py` | Extract the instrument method from one `.raw` file into a formatted report (below). |
+| `mapfile_crosscheck.py` | Cross-check a sequence-derived sample mapfile against the metadata embedded in the `.raw` files (immune to sequence-CSV export errors); writes a raw-derived mapfile and a discrepancy/batch-order report. Usage: `python mapfile_crosscheck.py <raw_dir_or_filelist> <sequence_mapfile> <output_prefix>` |
+
+Both require [`fisher_py`](https://pypi.org/project/fisher_py/).
+
+## instrument_method_report.py
+
 Extract the **instrument method** from a Thermo `.raw` file and write a
 formatted, human-readable text report of every method component.
 
