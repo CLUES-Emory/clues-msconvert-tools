@@ -1,12 +1,12 @@
 # mapfile_crosscheck.py
 # Cross-check a sequence-derived sample mapfile against the metadata embedded in
 # the actual Thermo .raw files. Each raw file's sample info (Sample ID, Comment,
-# Sample Name) is written at acquisition time, so it is immune to sequence-CSV
-# export mistakes (mis-saved / mis-named / clobbered exports). This builds a
-# raw-derived mapfile and a discrepancy + batch-order report.
+# Sample Name) plus its physical Batch_* folder are written at acquisition time,
+# so they are immune to sequence-CSV export mistakes (mis-saved / mis-named /
+# clobbered exports). Builds a raw-derived mapfile and a discrepancy + order report.
 #
 # Usage:
-#   python mapfile_crosscheck.py <raw_input> <sequence_mapfile> <output_prefix>
+#   python mapfile_crosscheck.py <raw_input> <sequence_mapfile> <output_prefix> [exclude_types]
 #
 #     <raw_input>        directory holding Batch_* subfolders with .raw files,
 #                        OR a text file listing .raw paths (one per line)
@@ -15,6 +15,12 @@
 #     <output_prefix>    output path prefix; writes:
 #                          <prefix>_mapfile_from_raw.txt   (raw-derived, sorted by File.Name)
 #                          <prefix>_mapfile_crosscheck.txt (discrepancy + order report)
+#     [exclude_types]    optional comma-separated Sample_type values that the mapfile
+#                        intentionally drops (e.g. "Alkanes,Instrument_Blank"), so they
+#                        are not reported as "missing".
+#
+# If <prefix>_mapfile_from_raw.txt already exists it is reused (skips the slow RAW
+# read) - delete it to force a re-read.
 #
 # Requires: pip install fisher_py
 
@@ -22,7 +28,6 @@ import sys
 import os
 import re
 import csv
-from fisher_py import RawFile
 
 
 def batch_folder_of(path):
@@ -57,6 +62,7 @@ def collect_raw(inp):
 
 
 def read_raw_rows(paths):
+    from fisher_py import RawFile
     rows = {}
     errs = 0
     for path in paths:
@@ -74,6 +80,20 @@ def read_raw_rows(paths):
         rows[base] = dict(file=base, sid=sid, batch=batch, stype=stype,
                           folder=bf, folderbatch=(str(fb) if fb is not None else ""))
     return rows, errs
+
+
+def read_raw_mapfile(path):
+    """Reuse a previously written <prefix>_mapfile_from_raw.txt."""
+    rows = {}
+    with open(path, encoding="utf-8-sig", errors="replace", newline="") as fh:
+        for r in csv.DictReader(fh, delimiter="\t"):
+            f = r.get("File.Name", "").strip()
+            if not f:
+                continue
+            rows[f] = dict(file=f, sid=r.get("Sample.ID", ""), batch=r.get("Batch", ""),
+                           stype=r.get("Sample_type", ""), folder=r.get("BatchFolder", ""),
+                           folderbatch=r.get("FolderBatch", ""))
+    return rows
 
 
 def read_seq_mapfile(path):
@@ -99,24 +119,31 @@ def read_seq_mapfile(path):
 
 def main():
     if len(sys.argv) < 4:
-        print("Usage: python mapfile_crosscheck.py <raw_input> <sequence_mapfile> <output_prefix>")
+        print("Usage: python mapfile_crosscheck.py <raw_input> <sequence_mapfile> <output_prefix> [exclude_types]")
         sys.exit(2)
     raw_input, seq_map, prefix = sys.argv[1], sys.argv[2], sys.argv[3]
-
-    raw_paths = collect_raw(raw_input)
-    raw_rows, errs = read_raw_rows(raw_paths)
+    exclude_types = set()
+    if len(sys.argv) >= 5:
+        exclude_types = set(t.strip() for t in sys.argv[4].split(",") if t.strip())
 
     out_dir = os.path.dirname(os.path.abspath(prefix))
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
-
-    # --- raw-derived mapfile, sorted by File.Name ---
     raw_out = prefix + "_mapfile_from_raw.txt"
-    with open(raw_out, "w", encoding="utf-8", newline="") as fh:
-        fh.write("File.Name\tSample.ID\tBatch\tSample_type\tBatchFolder\tFolderBatch\n")
-        for base in sorted(raw_rows):
-            r = raw_rows[base]
-            fh.write(f"{r['file']}\t{r['sid']}\t{r['batch']}\t{r['stype']}\t{r['folder']}\t{r['folderbatch']}\n")
+
+    # --- raw-derived rows: reuse if already written, else read the RAW files ---
+    if os.path.exists(raw_out):
+        raw_rows = read_raw_mapfile(raw_out)
+        errs = 0
+        print(f"Reusing existing raw-derived mapfile ({len(raw_rows)} rows): {raw_out}")
+        print("  (delete it to force a re-read of the RAW files)")
+    else:
+        raw_rows, errs = read_raw_rows(collect_raw(raw_input))
+        with open(raw_out, "w", encoding="utf-8", newline="") as fh:
+            fh.write("File.Name\tSample.ID\tBatch\tSample_type\tBatchFolder\tFolderBatch\n")
+            for base in sorted(raw_rows):
+                r = raw_rows[base]
+                fh.write(f"{r['file']}\t{r['sid']}\t{r['batch']}\t{r['stype']}\t{r['folder']}\t{r['folderbatch']}\n")
 
     # --- read sequence-derived mapfile ---
     seq_rows = read_seq_mapfile(seq_map) if os.path.exists(seq_map) else []
@@ -130,17 +157,20 @@ def main():
 
     raw_files = set(raw_rows)
     seq_files = set(seq_by_file)
-    missing_from_seq = sorted(raw_files - seq_files)
+    missing_all = raw_files - seq_files
+    missing = sorted(f for f in missing_all if raw_rows[f]["stype"] not in exclude_types)
+    missing_excluded = sorted(f for f in missing_all if raw_rows[f]["stype"] in exclude_types)
     extra_in_seq = sorted(seq_files - raw_files)
     common = sorted(raw_files & seq_files)
 
+    # Batch mismatch: sequence Comment (mapfile Batch) vs the file's physical Batch_* folder
     batch_mismatch = []
     for f in common:
-        sb, rb, fb = seq_by_file[f]["batch"], raw_rows[f]["batch"], raw_rows[f]["folderbatch"]
-        if num(sb) is not None and num(rb) is not None and num(sb) != num(rb):
-            batch_mismatch.append((f, sb, rb, fb))
+        sb, fb = seq_by_file[f]["batch"], raw_rows[f]["folderbatch"]
+        if num(sb) is not None and num(fb) is not None and num(sb) != num(fb):
+            batch_mismatch.append((f, sb, fb))
 
-    # --- batch-order check on the sequence mapfile, in filename-sorted order ---
+    # Batch-order check on the sequence mapfile, in filename-sorted order
     order_issues = []
     prev, prev_file = None, None
     for r in sorted(seq_rows, key=lambda r: r["file"]):
@@ -157,11 +187,15 @@ def main():
         w("# Mapfile cross-check: sequence-derived mapfile vs. raw-file metadata\n")
         w(f"# Sequence mapfile : {seq_map}\n")
         w(f"# Raw files scanned: {len(raw_rows)} ({errs} read errors)\n")
-        w(f"# Sequence rows    : {len(seq_rows)} ({len(seq_files)} unique files)\n#\n")
+        w(f"# Sequence rows    : {len(seq_rows)} ({len(seq_files)} unique files)\n")
+        if exclude_types:
+            w(f"# Excluded types   : {', '.join(sorted(exclude_types))}\n")
+        w("#\n")
         w("## SUMMARY\n")
-        w(f"  Files in raw but MISSING from sequence mapfile : {len(missing_from_seq)}\n")
+        w(f"  Files in raw but MISSING from sequence mapfile : {len(missing)}\n")
+        w(f"    (excluded-type files also absent, expected)  : {len(missing_excluded)}\n")
         w(f"  Files in sequence mapfile with NO raw file     : {len(extra_in_seq)}\n")
-        w(f"  Batch label MISMATCH (sequence vs raw)         : {len(batch_mismatch)}\n")
+        w(f"  Batch label vs physical Batch folder MISMATCH  : {len(batch_mismatch)}\n")
         w(f"  Duplicate File.Name in sequence mapfile        : {len(dup_files)}\n")
         w(f"  Batch out-of-order inversions (by filename)    : {len(order_issues)}\n\n")
 
@@ -173,12 +207,12 @@ def main():
                 w("  (none)\n")
             w("\n")
 
-        section("MISSING FROM SEQUENCE MAPFILE (present in raw data)",
+        section("MISSING FROM SEQUENCE MAPFILE (present in raw, not an excluded type)",
                 [f"{f}   raw Batch={raw_rows[f]['batch']}  folder={raw_rows[f]['folder']}"
-                 for f in missing_from_seq])
+                 for f in missing])
         section("IN SEQUENCE MAPFILE BUT NO MATCHING RAW FILE", extra_in_seq)
-        section("BATCH MISMATCH  (file: sequence -> raw [folder])",
-                [f"{f}: {sb} -> {rb} [{fb}]" for (f, sb, rb, fb) in batch_mismatch])
+        section("BATCH MISMATCH  (file: sequence Comment -> physical Batch folder)",
+                [f"{f}: {sb} -> {fb}" for (f, sb, fb) in batch_mismatch])
         section("DUPLICATE File.Name IN SEQUENCE MAPFILE", sorted(dup_files))
         section("BATCH ORDER INVERSIONS (sequence mapfile sorted by filename)",
                 [f"after {pf} (batch {pb}), {cf} has batch {cb}"
@@ -186,8 +220,9 @@ def main():
 
     print(f"Raw-derived mapfile: {raw_out}")
     print(f"Cross-check report : {cc}")
-    print(f"SUMMARY  missing_from_seq={len(missing_from_seq)}  extra_in_seq={len(extra_in_seq)}  "
-          f"batch_mismatch={len(batch_mismatch)}  dup={len(dup_files)}  order_inversions={len(order_issues)}")
+    print(f"SUMMARY  missing={len(missing)} (+{len(missing_excluded)} excluded-type)  "
+          f"extra_in_seq={len(extra_in_seq)}  batch_mismatch={len(batch_mismatch)}  "
+          f"dup={len(dup_files)}  order_inversions={len(order_issues)}")
 
 
 if __name__ == "__main__":
