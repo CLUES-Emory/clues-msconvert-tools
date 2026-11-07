@@ -1,14 +1,42 @@
 # thermo-raw-method-report
 
-Helper scripts for reading metadata out of Thermo `.raw` files, used by the
-CLUES file-conversion workflow (pulled from this repo at run time).
+Helper scripts for the CLUES file-conversion workflow. The conversion scripts pull them from this repo at run time.
 
-| Script | Purpose |
-|--------|---------|
-| `instrument_method_report.py` | Extract the instrument method from one `.raw` file into a formatted report (below). |
-| `mapfile_crosscheck.py` | Cross-check a sequence-derived sample mapfile against the metadata embedded in the `.raw` files (immune to sequence-CSV export errors); writes a raw-derived mapfile and a discrepancy/batch-order report. Usage: `python mapfile_crosscheck.py <raw_dir_or_filelist> <sequence_mapfile> <output_prefix>` |
+| Script | Purpose | Requires |
+|--------|---------|----------|
+| `instrument_method_report.py` | Extracts the instrument method from one `.raw` file into a formatted report (see below). | [`fisher_py`](https://pypi.org/project/fisher_py/) |
+| `lc_sequence_mapfile.py` | Builds the LC-HRMS sample mapfiles, the list of files to convert, the methods table and a QC report from the Xcalibur **sequence files**. It does not open `.raw` files (see below). Used by `LC-HRMS_parallel_msconvert_v2.4.ps1`. | Python standard library |
+| `mapfile_crosscheck.py` | Cross-checks a sequence-derived sample mapfile against the metadata embedded in the `.raw` files, and writes a raw-derived mapfile and a report of discrepancies and batch order. Used by LC-HRMS v2.3. Usage: `python mapfile_crosscheck.py <raw_dir_or_filelist> <sequence_mapfile> <output_prefix>` | [`fisher_py`](https://pypi.org/project/fisher_py/) |
 
-Both require [`fisher_py`](https://pypi.org/project/fisher_py/).
+## lc_sequence_mapfile.py
+
+This script builds the sample mapfiles for one LC mode of a study in the CLUES standard layout:
+
+```
+<study>_<LC>\3-Sequence_Files\*.csv        Xcalibur sequence exports (the source)
+<study>_<LC>\1-Raw_Files\Batch_*\*.raw     MS1  (listed only, never opened)
+<study>_<LC>\1-Raw_Files\Batch_*\MSMS\*.raw MSMS (listed only, never opened)
+```
+
+**Mapfile columns:** `File.Name` ← `File Name`, `Sample.ID` ← `Sample ID`, `Batch` ← `Comment`, `Sample_type` ← `Sample Name`.
+
+**Rules:**
+- Rows stay in sequence order. The CSVs are taken in the order of the batch number in their name.
+- Polarity comes from the `Instrument Method` column, then the `File Name`. It is **never** taken from row order: LC-HRMS v2.3 sorted the rows by file name and then alternated pos and neg, which mislabels about half the rows when file names contain pos/neg.
+- Rows are matched to `.raw` files by name, from a folder listing:
+  - Rows with no `.raw` file stay in the mapfile and are reported.
+  - Only listed files are converted. Unlisted files, such as an aborted run, are reported.
+  - Xcalibur's renamed repeats (`name_yyyymmddhhmmss`) are matched to the repeated rows.
+  - Duplicate copies of a file are resolved by the sequence `Path`.
+- Rows whose `Sample Name` is in `--exclude-types` are converted but left out of the mapfiles.
+
+```bash
+python lc_sequence_mapfile.py --raw-dir <...\1-Raw_Files> --seq-dir <...\3-Sequence_Files> \
+    --out-dir <out> --study-id <ID> --lc-mode <HILIC|C18> \
+    [--exclude-types MSMS,Cal_Std,PFAS-MSMS] [--min-age-minutes 15]
+```
+
+It writes `<ID>_<LC>{pos,neg}_sample_mapfile.txt` and a combined mapfile, plus `_sequence_check.tsv`, `_conversion_manifest.tsv`, `_methods.tsv`, `_mapfile_QC.txt` and `_mapfile_summary.json`. The tests are in `tests/` (`python -m unittest discover -s tests`).
 
 ## instrument_method_report.py
 
