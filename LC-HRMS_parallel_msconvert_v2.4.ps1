@@ -515,6 +515,14 @@ function New-LCMethodReports {
         if ($methods.Count -eq 0) { Write-Host "WARNING: no methods found." -ForegroundColor Yellow; return $null }
         Write-Host "Distinct methods in the sequence files: $($methods.Count)"
 
+        # The report script needs fisher_py; check once instead of failing per method
+        $null = & $PythonExe -c "import fisher_py" 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "WARNING: fisher_py is not installed for '$PythonExe'; skipping method reports (conversion continues)." -ForegroundColor Yellow
+            Write-Host "         Install it with: $PythonExe -m pip install fisher_py" -ForegroundColor DarkGray
+            return $null
+        }
+
         $reportDir = Join-Path $OutputPath "2-Method_Report"
         if (!(Test-Path -LiteralPath $reportDir)) { New-Item -ItemType Directory -Path $reportDir -Force | Out-Null }
 
