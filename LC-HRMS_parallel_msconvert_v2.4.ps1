@@ -18,7 +18,7 @@
     per distinct method is read for the method reports.
 
     Helper scripts are pulled from GitHub at run time, both from
-    CLUES-Emory/thermo-raw-method-report: lc_sequence_mapfile.py (mapfiles; falls
+    CLUES-Emory/clues-msconvert-tools: lc_sequence_mapfile.py (mapfiles; falls
     back to the copy next to this script, then the last download) and
     instrument_method_report.py (method reports; optional).
 
@@ -180,7 +180,7 @@ $config = @{
     # from the same repo as the method report script. If the download fails, the copy
     # next to this script is used, then the last downloaded copy in %TEMP%.
     # Set MapfileScriptUrl = "" to always use the local copy.
-    MapfileScriptUrl = "https://raw.githubusercontent.com/CLUES-Emory/thermo-raw-method-report/main/lc_sequence_mapfile.py"
+    MapfileScriptUrl = "https://raw.githubusercontent.com/CLUES-Emory/clues-msconvert-tools/main/lc_sequence_mapfile.py"
     MapfileScript    = (Join-Path $PSScriptRoot "lc_sequence_mapfile.py")
 
     # Python executable (name on PATH, or full path to python.exe).
@@ -191,7 +191,7 @@ $config = @{
     # INSTRUMENT METHOD REPORT SETTINGS (OPTIONAL)
     #---------------------------------------------------------------------------
     GenerateMethodReport  = $true
-    MethodReportScriptUrl = "https://raw.githubusercontent.com/CLUES-Emory/thermo-raw-method-report/main/instrument_method_report.py"
+    MethodReportScriptUrl = "https://raw.githubusercontent.com/CLUES-Emory/clues-msconvert-tools/main/instrument_method_report.py"
 
     # Save the console output to <OutputDirectory>\<StudyID>_conversion_log_<timestamp>.txt
     WriteRunLog      = $true

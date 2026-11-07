@@ -1,4 +1,4 @@
-# thermo-raw-method-report
+# clues-msconvert-tools
 
 This repo holds the CLUES LC-HRMS conversion driver and the helper scripts that the conversion scripts pull from it at run time.
 
@@ -104,7 +104,7 @@ latest version of the script directly, no authentication required.
 **PowerShell**
 
 ```powershell
-$src = "https://raw.githubusercontent.com/CLUES-Emory/thermo-raw-method-report/main/instrument_method_report.py"
+$src = "https://raw.githubusercontent.com/CLUES-Emory/clues-msconvert-tools/main/instrument_method_report.py"
 $dst = Join-Path $PSScriptRoot "instrument_method_report.py"
 Invoke-WebRequest -Uri $src -OutFile $dst
 
@@ -116,7 +116,7 @@ python $dst "C:\data\sample.raw" "C:\reports"
 
 ```bash
 curl -L -o instrument_method_report.py \
-  https://raw.githubusercontent.com/CLUES-Emory/thermo-raw-method-report/main/instrument_method_report.py
+  https://raw.githubusercontent.com/CLUES-Emory/clues-msconvert-tools/main/instrument_method_report.py
 ```
 
 Pin to a specific tagged release by replacing `main` with the tag (e.g.
