@@ -15,9 +15,12 @@ This repo holds the CLUES LC-HRMS conversion driver and the helper scripts that 
 Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process
 cd <this repo>
 # check the mapfiles and QC report first, then rerun without -MapfileOnly (add -MSConvertPath)
-.\LC-HRMS_parallel_msconvert_v2.4.ps1 -StudyFolderName CLU0000_YYMMDD_NAME -StudyID CLU0000 `
-    -OutputDirectory "D:\path\to\output" -LCModes HILIC,C18 -RawFilesRoot "R:\<USERNAME>\1-RAW Files" -MapfileOnly
+.\LC-HRMS_parallel_msconvert_v2.4.ps1 -StudyID CLU0000 -OutputDirectory "D:\path\to\output" `
+    -HILICPath "R:\<USERNAME>\1-RAW Files\<date>-RawFiles_LC-<model>-<Instrument>\CLU0000_YYMMDD_NAME_HILIC" `
+    -C18Path   "R:\<USERNAME>\1-RAW Files\<date>-RawFiles_LC-<model>-<Instrument>\CLU0000_YYMMDD_NAME_C18" -MapfileOnly
 ```
+
+`HILICPath` and `C18Path` are each mode's study folder, the one holding `1-Raw_Files` and `3-Sequence_Files`. Leave one blank, or pass `""`, to convert only the other mode. Nothing is searched for. The script stops before any work if a path is missing, isn't a study folder, or ends in the other mode's suffix (swapped paths).
 
 The driver downloads `lc_sequence_mapfile.py` and `instrument_method_report.py` from this repo (`main`) at run time. If the mapfile script can't be downloaded, it uses the copy next to the driver, which is in this repo. MSMS mzML go to `1a-<LC>_mzML\<LC>_MSMS\`.
 

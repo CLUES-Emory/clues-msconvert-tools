@@ -6,13 +6,13 @@
     Converts Thermo RAW files to mzML in parallel and writes the sample mapfiles
     used by 6-Data_Extraction, for any untargeted LC-HRMS study stored as:
 
-        <RawFilesRoot>\<date>-RawFiles_LC-<model>-<Instrument>\<StudyFolderName>_<LC>\
+        <study folder for one LC mode, e.g. ...\CLU0000_YYMMDD_NAME_HILIC>\
             1-Raw_Files\Batch_*\*.raw            MS1 files   -> 1a-<LC>_mzML
             1-Raw_Files\Batch_*\MSMS\*.raw       MSMS files  -> 1a-<LC>_mzML\<LC>_MSMS
             3-Sequence_Files\*.csv               Xcalibur sequence exports
 
-    The study folder is found automatically under RawFilesRoot (any instrument),
-    so only the study folder name is needed. The mapfiles and the list of files to
+    Give the study folder for each LC mode explicitly (HILICPath, C18Path); a mode
+    left blank is not processed. Nothing is searched for. The mapfiles and the list of files to
     convert come from the Xcalibur sequence files (lc_sequence_mapfile.py, Python
     standard library). RAW files are only converted by msconvert, and one RAW file
     per distinct method is read for the method reports.
@@ -49,9 +49,11 @@
               unlisted files (e.g. an aborted run) are reported, not converted.
               Xcalibur's renamed repeats (name_yyyymmddhhmmss) are matched to the
               repeated sequence rows.
-            * Study folder found automatically under RawFilesRoot; Instruments is
-              optional (a newly added instrument folder works without a registry
-              entry); StudyPaths overrides the location (e.g. a copy on D:).
+            * The study folder of each LC mode is given explicitly (HILICPath,
+              C18Path); a blank path skips that mode. Replaces the instrument
+              registry, StudyFolderName and LCModes. A path whose folder name
+              ends in the other mode's suffix (e.g. _C18 given as HILICPath) is
+              rejected.
             * MSMS mzML go to 1a-<LC>_mzML\<LC>_MSMS (was 1b-<LC>_mzML_MSMS).
             * RAW files modified < SkipFilesNewerThanMinutes ago (still being
               acquired) are left for the next run.
@@ -77,16 +79,21 @@
 
 .EXAMPLE
     # Settings can also be given on the command line (they override $config):
-    .\LC-HRMS_parallel_msconvert_v2.4.ps1 -StudyFolderName CLU0000_YYMMDD_NAME -StudyID CLU0000 `
-        -OutputDirectory D:\path\to\output -LCModes HILIC,C18
+    .\LC-HRMS_parallel_msconvert_v2.4.ps1 -StudyID CLU0000 -OutputDirectory D:\path\to\output `
+        -HILICPath "R:\<USERNAME>\1-RAW Files\<date>-RawFiles_LC-<model>-<Instrument>\CLU0000_YYMMDD_NAME_HILIC" `
+        -C18Path   "R:\<USERNAME>\1-RAW Files\<date>-RawFiles_LC-<model>-<Instrument>\CLU0000_YYMMDD_NAME_C18"
+
+.EXAMPLE
+    # One mode only: leave the other path blank (in $config, or pass it as "")
+    .\LC-HRMS_parallel_msconvert_v2.4.ps1 -StudyID CLU0000 -OutputDirectory D:\path\to\output `
+        -C18Path "R:\...\CLU0000_YYMMDD_NAME_C18" -HILICPath ""
 #>
 
 param(
-    [string]$StudyFolderName,
     [string]$StudyID,
     [string]$OutputDirectory,
-    [string[]]$LCModes,
-    [string]$RawFilesRoot,
+    [string]$HILICPath,
+    [string]$C18Path,
     [string]$MSConvertPath,
     [string]$PythonExe,
     [switch]$MapfileOnly       # build mapfiles / QC / method reports only; no conversion
@@ -103,38 +110,21 @@ $config = @{
     #---------------------------------------------------------------------------
     # STUDY SETTINGS
     #---------------------------------------------------------------------------
-    # Study folder name: the part before "_HILIC" / "_C18", e.g. "CLU0000_YYMMDD_NAME"
-    StudyFolderName  = "<STUDY_FOLDER_NAME>"
-
     # Study ID for output file naming, e.g. "CLU0000"
     StudyID          = "<STUDY_ID>"
 
     # Output directory for mzML files, mapfiles and logs
     OutputDirectory  = "<PATH_TO_OUTPUT_DIRECTORY>"
 
-    # LC modes to process: @("HILIC"), @("C18"), or @("HILIC", "C18")
-    LCModes          = @("HILIC", "C18")
-
     #---------------------------------------------------------------------------
-    # WHERE THE STUDY IS
+    # STUDY FOLDERS (one per LC mode)
     #---------------------------------------------------------------------------
-    # Folder holding the instrument folders (<date>-RawFiles_LC-<model>-<Instrument>)
-    RawFilesRoot     = "R:\<USERNAME>\1-RAW Files"
-
-    # Only instrument folders whose name matches this regex are searched
-    InstrumentFolderPattern = "RawFiles_LC"
-
-    # Optional. By default the script searches every instrument folder for
-    # <StudyFolderName>_<LC> and stops if it is found in none or in more than one.
-    # Name the instrument per mode to restrict the search (matched against the end
-    # of the instrument folder name, case-insensitive):
-    #   Instruments = @{ HILIC = "<INSTRUMENT_A>"; C18 = "<INSTRUMENT_B>" }
-    Instruments      = @{}
-
-    # Optional. Full path of the study folder per LC mode (the folder holding
-    # 1-Raw_Files and 3-Sequence_Files); overrides the search, e.g. for a copy:
-    #   StudyPaths = @{ HILIC = "D:\copies\CLU0000_YYMMDD_NAME_HILIC" }
-    StudyPaths       = @{}
+    # Full path of each LC mode's study folder: the folder that holds 1-Raw_Files
+    # and 3-Sequence_Files. Leave a mode blank ("") to skip it; at least one is
+    # required. Nothing is searched for: only these folders are used.
+    #   e.g. "R:\<USERNAME>\1-RAW Files\<date>-RawFiles_LC-<model>-<Instrument>\CLU0000_YYMMDD_NAME_HILIC"
+    HILICPath        = ""
+    C18Path          = ""
 
     #---------------------------------------------------------------------------
     # MSCONVERT SETTINGS
@@ -198,11 +188,11 @@ $config = @{
 }
 
 # Command-line values override $config
-if ($StudyFolderName) { $config.StudyFolderName = $StudyFolderName }
 if ($StudyID)         { $config.StudyID         = $StudyID }
 if ($OutputDirectory) { $config.OutputDirectory = $OutputDirectory }
-if ($LCModes)         { $config.LCModes         = @($LCModes | ForEach-Object { $_ -split ',' } | Where-Object { $_ }) }
-if ($RawFilesRoot)    { $config.RawFilesRoot    = $RawFilesRoot }
+# A path given on the command line always wins, including "" (which skips that mode)
+if ($PSBoundParameters.ContainsKey('HILICPath')) { $config.HILICPath = $HILICPath }
+if ($PSBoundParameters.ContainsKey('C18Path'))   { $config.C18Path   = $C18Path }
 if ($MSConvertPath)   { $config.MSConvertPath   = $MSConvertPath }
 if ($PythonExe)       { $config.PythonExe       = $PythonExe }
 
@@ -213,49 +203,33 @@ $Utf8NoBom = New-Object System.Text.UTF8Encoding $false
 # FUNCTIONS
 #===============================================================================
 
-function Resolve-LCStudyPaths {
+function Get-LCStudyPaths {
     <#
     .SYNOPSIS
-        Finds <StudyFolderName>_<LCMode> for one LC mode. Returns a hashtable
-        (BasePath, RawFilesPath, SequenceFilesPath, Instrument) or throws.
+        Checks the study folder given for one LC mode (no searching) and returns a
+        hashtable (BasePath, RawFilesPath, SequenceFilesPath), or throws.
     #>
     param(
-        [Parameter(Mandatory=$true)] [hashtable]$Config,
+        [Parameter(Mandatory=$true)] [string]$Path,
         [Parameter(Mandatory=$true)] [string]$LCMode
     )
-    $folder = "$($Config.StudyFolderName)_$LCMode"
-    $base = $null; $instrument = ""
-
-    if ($Config.StudyPaths -and $Config.StudyPaths[$LCMode]) {
-        $base = $Config.StudyPaths[$LCMode]
-        if (!(Test-Path -LiteralPath $base)) { throw "StudyPaths.$LCMode not found: $base" }
-        $instrument = "(StudyPaths)"
+    $base = $Path.Trim().Trim('"').TrimEnd('\', '/')
+    if (!(Test-Path -LiteralPath $base -PathType Container)) { throw "${LCMode}Path not found: $base" }
+    $leaf  = Split-Path $base -Leaf
+    $other = if ($LCMode -eq "HILIC") { "C18" } else { "HILIC" }
+    if ($leaf -match "(?i)_${other}$") {
+        throw "${LCMode}Path points at a $other folder ($leaf). Check that HILICPath and C18Path are not swapped."
     }
-    else {
-        if (!(Test-Path -LiteralPath $Config.RawFilesRoot)) { throw "RawFilesRoot not found: $($Config.RawFilesRoot)" }
-        $instDirs = @(Get-ChildItem -LiteralPath $Config.RawFilesRoot -Directory |
-                      Where-Object { $_.Name -match $Config.InstrumentFolderPattern })
-        $want = if ($Config.Instruments) { $Config.Instruments[$LCMode] } else { $null }
-        if ($want) {
-            $instDirs = @($instDirs | Where-Object { $_.Name -match ("[-_]" + [regex]::Escape($want) + "$") })
-            if ($instDirs.Count -eq 0) { throw "No instrument folder ending in '$want' under $($Config.RawFilesRoot)" }
-        }
-        $hits = @($instDirs | ForEach-Object { Join-Path $_.FullName $folder } | Where-Object { Test-Path -LiteralPath $_ })
-        if ($hits.Count -eq 0) {
-            throw "Study folder '$folder' not found in: $(($instDirs | ForEach-Object Name) -join ', ')"
-        }
-        if ($hits.Count -gt 1) {
-            throw "Study folder '$folder' found in more than one instrument folder; set Instruments.$LCMode`n  $($hits -join "`n  ")"
-        }
-        $base = $hits[0]
-        $instrument = ((Split-Path (Split-Path $base -Parent) -Leaf) -split '-')[-1]
+    if ($leaf -notmatch "(?i)_${LCMode}$") {
+        Write-Host "WARNING: ${LCMode}Path folder name '$leaf' does not end in _$LCMode; check it is the right study folder." -ForegroundColor Yellow
     }
-    return @{
-        BasePath          = $base
-        RawFilesPath      = Join-Path $base "1-Raw_Files"
-        SequenceFilesPath = Join-Path $base "3-Sequence_Files"
-        Instrument        = $instrument
+    $raw = Join-Path $base "1-Raw_Files"
+    $seq = Join-Path $base "3-Sequence_Files"
+    $missing = @($raw, $seq | Where-Object { !(Test-Path -LiteralPath $_ -PathType Container) })
+    if ($missing.Count -gt 0) {
+        throw "${LCMode}Path is not a study folder (missing: $(($missing | ForEach-Object { Split-Path $_ -Leaf }) -join ', ')): $base"
     }
+    return @{ BasePath = $base; RawFilesPath = $raw; SequenceFilesPath = $seq }
 }
 
 
@@ -899,11 +873,21 @@ Write-Host "====================================================================
 Write-Host ""
 
 Write-Host "Validating configuration..." -ForegroundColor Yellow
-$placeholders = @("StudyFolderName", "StudyID", "OutputDirectory", "RawFilesRoot") |
-                Where-Object { "$($config[$_])" -match '<[A-Z_]+>' -and -not ($_ -eq "RawFilesRoot" -and $config.StudyPaths.Count -gt 0) }
+$placeholders = @(@("StudyID", "OutputDirectory") | Where-Object { "$($config[$_])" -match '<[A-Z_]+>' -or -not "$($config[$_])".Trim() })
 if (-not $MapfileOnly -and "$($config.MSConvertPath)" -match '<[A-Z_]+>') { $placeholders += "MSConvertPath" }
 if ($placeholders) {
     Write-Host "ERROR: Set these values in `$config (or on the command line): $($placeholders -join ', ')" -ForegroundColor Red
+    exit 1
+}
+# LC modes = the modes with a study folder path; a blank path skips that mode
+$modePaths = [ordered]@{ HILIC = "$($config.HILICPath)".Trim(); C18 = "$($config.C18Path)".Trim() }
+$config.LCModes = @($modePaths.Keys | Where-Object { $modePaths[$_] })
+if ($config.LCModes.Count -eq 0) {
+    Write-Host "ERROR: Set HILICPath and/or C18Path (the study folder holding 1-Raw_Files and 3-Sequence_Files)." -ForegroundColor Red
+    exit 1
+}
+if ($config.LCModes.Count -eq 2 -and $modePaths.HILIC.TrimEnd('\', '/') -eq $modePaths.C18.TrimEnd('\', '/')) {
+    Write-Host "ERROR: HILICPath and C18Path are the same folder." -ForegroundColor Red
     exit 1
 }
 if (-not $MapfileOnly -and !(Test-Path -LiteralPath $config.MSConvertPath)) {
@@ -919,10 +903,10 @@ if ($config.WriteRunLog) {
     try { Start-Transcript -LiteralPath $logPath | Out-Null; $transcribing = $true } catch {}
 }
 
-# Resolve every LC mode before doing any work
+# Check every study folder before doing any work
 $lcPaths = @{}
 foreach ($lcMode in $config.LCModes) {
-    try { $lcPaths[$lcMode] = Resolve-LCStudyPaths -Config $config -LCMode $lcMode }
+    try { $lcPaths[$lcMode] = Get-LCStudyPaths -Path $modePaths[$lcMode] -LCMode $lcMode }
     catch {
         Write-Host "ERROR ($lcMode): $($_.Exception.Message)" -ForegroundColor Red
         if ($transcribing) { Stop-Transcript | Out-Null }
@@ -944,10 +928,10 @@ if (-not (Get-Command $config.PythonExe -ErrorAction SilentlyContinue)) {
 
 Write-Host ""
 Write-Host "Configuration:" -ForegroundColor Green
-Write-Host "  Study: $($config.StudyID) ($($config.StudyFolderName))"
-Write-Host "  LC Modes: $($config.LCModes -join ', ')"
+Write-Host "  Study: $($config.StudyID)"
+Write-Host "  LC Modes: $($config.LCModes -join ', ')$(if ($config.LCModes.Count -lt 2) { '   (other mode left blank: skipped)' })"
 foreach ($lcMode in $config.LCModes) {
-    Write-Host "    $lcMode -> $($lcPaths[$lcMode].Instrument): $($lcPaths[$lcMode].BasePath)"
+    Write-Host "    $lcMode -> $($lcPaths[$lcMode].BasePath)"
 }
 Write-Host "  Output: $($config.OutputDirectory)"
 Write-Host "  Mapfiles: from sequence files (lc_sequence_mapfile.py)   Excluded sample types: $($config.ExcludeSampleTypes -join ', ')"
