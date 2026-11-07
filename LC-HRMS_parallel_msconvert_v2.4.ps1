@@ -1,0 +1,1074 @@
+﻿<#
+.SYNOPSIS
+    Parallel msconvert for LC-HRMS RAW files in the CLUES standard study layout.
+
+.DESCRIPTION
+    Converts Thermo RAW files to mzML in parallel and writes the sample mapfiles
+    used by 6-Data_Extraction, for any untargeted LC-HRMS study stored as:
+
+        <RawFilesRoot>\<date>-RawFiles_LC-<model>-<Instrument>\<StudyFolderName>_<LC>\
+            1-Raw_Files\Batch_*\*.raw            MS1 files   -> 1a-<LC>_mzML
+            1-Raw_Files\Batch_*\MSMS\*.raw       MSMS files  -> 1a-<LC>_mzML\<LC>_MSMS
+            3-Sequence_Files\*.csv               Xcalibur sequence exports
+
+    The study folder is found automatically under RawFilesRoot (any instrument),
+    so only the study folder name is needed. The mapfiles and the list of files to
+    convert come from the Xcalibur sequence files (lc_sequence_mapfile.py, Python
+    standard library). RAW files are only converted by msconvert, and one RAW file
+    per distinct method is read for the method reports.
+
+    Helper scripts are pulled from GitHub at run time, both from
+    CLUES-Emory/thermo-raw-method-report: lc_sequence_mapfile.py (mapfiles; falls
+    back to the copy next to this script, then the last download) and
+    instrument_method_report.py (method reports; optional).
+
+.NOTES
+    Script Version: 2.4
+    Author: CLUES Lab, Emory University
+
+    Version History:
+    - v2.0: Initial LC-HRMS multi-instrument support
+    - v2.1: Automatic sequence file path generation using instrument paths
+    - v2.2: Optional centroiding, WriteIndex, BinaryEncodingPrecision
+    - v2.3 (2026-09-08): Instrument method report step; instruments selected
+            per LC mode by name; mapfile sort + RAW cross-check.
+    - v2.4 (2026-11-07): General version for any study in the standard layout.
+            * FIX: polarity is no longer assigned by odd/even row. v2.3 sorted the
+              sequence rows by file name and then alternated pos/neg, which puts
+              about half of the files in the wrong polarity mapfile whenever file
+              names contain pos/neg (108 of 214 rows in one test study).
+              Polarity now comes from the sequence "Instrument Method" column
+              (then the File Name), never from row order.
+            * Mapfiles still come from the sequence CSVs (File Name, Sample ID,
+              Comment -> Batch, Sample Name -> Sample_type), in sequence order:
+              CSVs by the batch number in their name, rows as listed.
+              Output format (File.Name, Sample.ID, Batch, Sample_type) unchanged.
+            * Each sequence row is matched to its RAW file by name (listing only;
+              RAW files are not opened). Rows with no RAW file stay in the mapfile
+              and are reported. Only RAW files listed in a sequence are converted;
+              unlisted files (e.g. an aborted run) are reported, not converted.
+              Xcalibur's renamed repeats (name_yyyymmddhhmmss) are matched to the
+              repeated sequence rows.
+            * Study folder found automatically under RawFilesRoot; Instruments is
+              optional (a newly added instrument folder works without a registry
+              entry); StudyPaths overrides the location (e.g. a copy on D:).
+            * MSMS mzML go to 1a-<LC>_mzML\<LC>_MSMS (was 1b-<LC>_mzML_MSMS).
+            * RAW files modified < SkipFilesNewerThanMinutes ago (still being
+              acquired) are left for the next run.
+            * Incomplete mzML files (e.g. from a killed or timed-out msconvert)
+              are detected and reconverted; msconvert is stopped at the timeout and
+              partial output removed; the real msconvert error is logged.
+            * Method reports: one per distinct method in the sequence (MS1 + MSMS),
+              read from one representative RAW file each.
+            * QC report, per-row sequence check and a run log are written.
+            The msconvert settings and conversion engine are unchanged from v2.3.
+            Developed with Claude Opus 5.5 via Claude Code.
+
+    Requirements: Windows PowerShell 5.1+, ProteoWizard msconvert, Python 3.8+
+    (standard library for the mapfiles; fisher_py for the method reports only).
+
+    BEFORE RUNNING: Execute this command in PowerShell to allow script execution:
+        Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process
+
+.EXAMPLE
+    Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process
+    cd <folder holding this script>
+    .\LC-HRMS_parallel_msconvert_v2.4.ps1
+
+.EXAMPLE
+    # Settings can also be given on the command line (they override $config):
+    .\LC-HRMS_parallel_msconvert_v2.4.ps1 -StudyFolderName CLU0000_YYMMDD_NAME -StudyID CLU0000 `
+        -OutputDirectory D:\path\to\output -LCModes HILIC,C18
+#>
+
+param(
+    [string]$StudyFolderName,
+    [string]$StudyID,
+    [string]$OutputDirectory,
+    [string[]]$LCModes,
+    [string]$RawFilesRoot,
+    [string]$MSConvertPath,
+    [string]$PythonExe,
+    [switch]$MapfileOnly       # build mapfiles / QC / method reports only; no conversion
+)
+
+#===============================================================================
+# CONFIGURATION - Edit this section for your study
+# -----------------------------------------------------------------------------
+# Values shown as <PLACEHOLDER> MUST be replaced (here or on the command line).
+# Do not commit real data paths, machine paths, or usernames to a public repo.
+#===============================================================================
+
+$config = @{
+    #---------------------------------------------------------------------------
+    # STUDY SETTINGS
+    #---------------------------------------------------------------------------
+    # Study folder name: the part before "_HILIC" / "_C18", e.g. "CLU0000_YYMMDD_NAME"
+    StudyFolderName  = "<STUDY_FOLDER_NAME>"
+
+    # Study ID for output file naming, e.g. "CLU0000"
+    StudyID          = "<STUDY_ID>"
+
+    # Output directory for mzML files, mapfiles and logs
+    OutputDirectory  = "<PATH_TO_OUTPUT_DIRECTORY>"
+
+    # LC modes to process: @("HILIC"), @("C18"), or @("HILIC", "C18")
+    LCModes          = @("HILIC", "C18")
+
+    #---------------------------------------------------------------------------
+    # WHERE THE STUDY IS
+    #---------------------------------------------------------------------------
+    # Folder holding the instrument folders (<date>-RawFiles_LC-<model>-<Instrument>)
+    RawFilesRoot     = "R:\<USERNAME>\1-RAW Files"
+
+    # Only instrument folders whose name matches this regex are searched
+    InstrumentFolderPattern = "RawFiles_LC"
+
+    # Optional. By default the script searches every instrument folder for
+    # <StudyFolderName>_<LC> and stops if it is found in none or in more than one.
+    # Name the instrument per mode to restrict the search (matched against the end
+    # of the instrument folder name, case-insensitive):
+    #   Instruments = @{ HILIC = "<INSTRUMENT_A>"; C18 = "<INSTRUMENT_B>" }
+    Instruments      = @{}
+
+    # Optional. Full path of the study folder per LC mode (the folder holding
+    # 1-Raw_Files and 3-Sequence_Files); overrides the search, e.g. for a copy:
+    #   StudyPaths = @{ HILIC = "D:\copies\CLU0000_YYMMDD_NAME_HILIC" }
+    StudyPaths       = @{}
+
+    #---------------------------------------------------------------------------
+    # MSCONVERT SETTINGS
+    #---------------------------------------------------------------------------
+    # Full path to msconvert.exe
+    # Typically under: C:\Users\<you>\AppData\Local\Apps\ProteoWizard <version>\msconvert.exe
+    MSConvertPath    = "<PATH_TO_MSCONVERT_EXE>"
+
+    # Number of parallel conversion jobs (network drive: 4-6; local disk: up to cores/3)
+    MaxParallelJobs  = 6
+
+    # Timeout per file in minutes (0 = no timeout)
+    TimeoutMinutes   = 10
+
+    # Skip files that already have a complete mzML
+    SkipExisting     = $true
+
+    # msconvert output options
+    OutputFormat     = "--mzML"
+    Compression      = "--zlib"
+
+    # Write index at end of mzML file (enables faster random access to spectra)
+    WriteIndex       = $true
+
+    # Binary encoding precision for m/z and intensity arrays: "32" or "64"
+    BinaryEncodingPrecision = "64"
+
+    # Centroiding (peak picking): $true = vendor peak picking, $false = keep as acquired
+    EnableCentroiding = $false
+
+    #---------------------------------------------------------------------------
+    # MAPFILE SETTINGS (mapfiles are built from the sequence CSVs)
+    #---------------------------------------------------------------------------
+    # Sample types (sequence "Sample Name") left out of the mapfiles. Their RAW files
+    # are still converted. Case-sensitive. e.g. @("MSMS", "Cal_Std", "PFAS-MSMS")
+    ExcludeSampleTypes = @("MSMS", "Cal_Std", "PFAS-MSMS")
+
+    # RAW files modified less than this many minutes ago are treated as still being
+    # acquired and are converted on a later run.
+    SkipFilesNewerThanMinutes = 15
+
+    # Mapfile builder (Python standard library only). Pulled from GitHub at run time,
+    # from the same repo as the method report script. If the download fails, the copy
+    # next to this script is used, then the last downloaded copy in %TEMP%.
+    # Set MapfileScriptUrl = "" to always use the local copy.
+    MapfileScriptUrl = "https://raw.githubusercontent.com/CLUES-Emory/thermo-raw-method-report/main/lc_sequence_mapfile.py"
+    MapfileScript    = (Join-Path $PSScriptRoot "lc_sequence_mapfile.py")
+
+    # Python executable (name on PATH, or full path to python.exe).
+    # fisher_py (pip install fisher_py) is needed only for the method reports.
+    PythonExe        = "python"
+
+    #---------------------------------------------------------------------------
+    # INSTRUMENT METHOD REPORT SETTINGS (OPTIONAL)
+    #---------------------------------------------------------------------------
+    GenerateMethodReport  = $true
+    MethodReportScriptUrl = "https://raw.githubusercontent.com/CLUES-Emory/thermo-raw-method-report/main/instrument_method_report.py"
+
+    # Save the console output to <OutputDirectory>\<StudyID>_conversion_log_<timestamp>.txt
+    WriteRunLog      = $true
+}
+
+# Command-line values override $config
+if ($StudyFolderName) { $config.StudyFolderName = $StudyFolderName }
+if ($StudyID)         { $config.StudyID         = $StudyID }
+if ($OutputDirectory) { $config.OutputDirectory = $OutputDirectory }
+if ($LCModes)         { $config.LCModes         = @($LCModes | ForEach-Object { $_ -split ',' } | Where-Object { $_ }) }
+if ($RawFilesRoot)    { $config.RawFilesRoot    = $RawFilesRoot }
+if ($MSConvertPath)   { $config.MSConvertPath   = $MSConvertPath }
+if ($PythonExe)       { $config.PythonExe       = $PythonExe }
+
+$ScriptVersion = "2.4"
+$Utf8NoBom = New-Object System.Text.UTF8Encoding $false
+
+#===============================================================================
+# FUNCTIONS
+#===============================================================================
+
+function Resolve-LCStudyPaths {
+    <#
+    .SYNOPSIS
+        Finds <StudyFolderName>_<LCMode> for one LC mode. Returns a hashtable
+        (BasePath, RawFilesPath, SequenceFilesPath, Instrument) or throws.
+    #>
+    param(
+        [Parameter(Mandatory=$true)] [hashtable]$Config,
+        [Parameter(Mandatory=$true)] [string]$LCMode
+    )
+    $folder = "$($Config.StudyFolderName)_$LCMode"
+    $base = $null; $instrument = ""
+
+    if ($Config.StudyPaths -and $Config.StudyPaths[$LCMode]) {
+        $base = $Config.StudyPaths[$LCMode]
+        if (!(Test-Path -LiteralPath $base)) { throw "StudyPaths.$LCMode not found: $base" }
+        $instrument = "(StudyPaths)"
+    }
+    else {
+        if (!(Test-Path -LiteralPath $Config.RawFilesRoot)) { throw "RawFilesRoot not found: $($Config.RawFilesRoot)" }
+        $instDirs = @(Get-ChildItem -LiteralPath $Config.RawFilesRoot -Directory |
+                      Where-Object { $_.Name -match $Config.InstrumentFolderPattern })
+        $want = if ($Config.Instruments) { $Config.Instruments[$LCMode] } else { $null }
+        if ($want) {
+            $instDirs = @($instDirs | Where-Object { $_.Name -match ("[-_]" + [regex]::Escape($want) + "$") })
+            if ($instDirs.Count -eq 0) { throw "No instrument folder ending in '$want' under $($Config.RawFilesRoot)" }
+        }
+        $hits = @($instDirs | ForEach-Object { Join-Path $_.FullName $folder } | Where-Object { Test-Path -LiteralPath $_ })
+        if ($hits.Count -eq 0) {
+            throw "Study folder '$folder' not found in: $(($instDirs | ForEach-Object Name) -join ', ')"
+        }
+        if ($hits.Count -gt 1) {
+            throw "Study folder '$folder' found in more than one instrument folder; set Instruments.$LCMode`n  $($hits -join "`n  ")"
+        }
+        $base = $hits[0]
+        $instrument = ((Split-Path (Split-Path $base -Parent) -Leaf) -split '-')[-1]
+    }
+    return @{
+        BasePath          = $base
+        RawFilesPath      = Join-Path $base "1-Raw_Files"
+        SequenceFilesPath = Join-Path $base "3-Sequence_Files"
+        Instrument        = $instrument
+    }
+}
+
+
+function Test-MapfileScript {
+    <# $true if the file looks like a complete lc_sequence_mapfile.py (guards against an HTML error page or a partial download). #>
+    param([string]$Path)
+    if (-not $Path -or !(Test-Path -LiteralPath $Path)) { return $false }
+    $text = Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue
+    return ($text -match 'def build\(' -and $text -match 'def main\(' -and $text -match '(?m)^VERSION = ')
+}
+
+
+function Get-MapfileScript {
+    <#
+    .SYNOPSIS
+        Returns the path of lc_sequence_mapfile.py to use: downloaded from GitHub
+        (same repo as the method report script), else the copy next to this script,
+        else the last downloaded copy in %TEMP%. $null if none is usable.
+    #>
+    param([string]$Url, [string]$LocalPath)
+    $cached = Join-Path $env:TEMP "lc_sequence_mapfile.py"
+    $use = $null; $source = ""
+    if ($Url) {
+        try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+        $tmp = "$cached.download"
+        try {
+            Invoke-WebRequest -Uri $Url -OutFile $tmp -UseBasicParsing -ErrorAction Stop
+            if (Test-MapfileScript -Path $tmp) {
+                Move-Item -LiteralPath $tmp -Destination $cached -Force
+                $use = $cached; $source = "GitHub ($Url)"
+            } else {
+                Write-Host "WARNING: downloaded mapfile script is not valid; not used." -ForegroundColor Yellow
+            }
+        } catch {
+            Write-Host "WARNING: could not download the mapfile script: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    }
+    if (-not $use -and (Test-MapfileScript -Path $LocalPath)) { $use = $LocalPath; $source = "local copy" }
+    if (-not $use -and $Url -and (Test-MapfileScript -Path $cached)) { $use = $cached; $source = "cached copy from an earlier download" }
+    if ($use) {
+        $ver = (Select-String -LiteralPath $use -Pattern '^VERSION = "(.*)"' | Select-Object -First 1).Matches.Groups[1].Value
+        Write-Host "Mapfile script: $source -> $use (v$ver)" -ForegroundColor Green
+    }
+    return $use
+}
+
+
+function Invoke-SequenceMapfile {
+    <#
+    .SYNOPSIS
+        Runs lc_sequence_mapfile.py for one LC mode: mapfiles, conversion list,
+        methods table and QC report from the sequence CSVs. Returns the files to
+        convert (from the manifest), or $null on failure.
+    #>
+    param(
+        [Parameter(Mandatory=$true)] [hashtable]$Config,
+        [Parameter(Mandatory=$true)] [hashtable]$Paths,
+        [Parameter(Mandatory=$true)] [string]$LCMode,
+        [Parameter(Mandatory=$true)] [string]$OutputPath
+    )
+    Write-Host ""
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host "$LCMode mapfiles from sequence files" -ForegroundColor Cyan
+    Write-Host "========================================" -ForegroundColor Cyan
+    # Windows PowerShell drops empty-string arguments to native programs, so an empty
+    # list is passed as ","
+    $exclTypes = (@($Config.ExcludeSampleTypes) | Where-Object { $_ }) -join ","
+    if (-not $exclTypes) { $exclTypes = "," }
+    $pyArgs = @($Config.MapfileScript,
+                "--raw-dir", $Paths.RawFilesPath, "--seq-dir", $Paths.SequenceFilesPath,
+                "--out-dir", $OutputPath, "--study-id", $Config.StudyID, "--lc-mode", $LCMode,
+                "--exclude-types", $exclTypes,
+                "--min-age-minutes", "$($Config.SkipFilesNewerThanMinutes)")
+    & $Config.PythonExe @pyArgs 2>&1 | ForEach-Object { Write-Host "  $_" }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "ERROR: mapfile step failed for $LCMode (exit $LASTEXITCODE)." -ForegroundColor Red
+        return $null
+    }
+    $pre = Join-Path $OutputPath "$($Config.StudyID)_${LCMode}"
+    $manifest = @(Import-Csv -LiteralPath "${pre}_conversion_manifest.tsv" -Delimiter "`t")
+    Write-Host "  QC report: ${pre}_mapfile_QC.txt" -ForegroundColor Green
+    return @{
+        RawFiles        = @($manifest | Where-Object { $_.Kind -eq "MS1" }  | ForEach-Object { $_.RawPath })
+        MSMSFiles       = @($manifest | Where-Object { $_.Kind -eq "MSMS" } | ForEach-Object { $_.RawPath })
+        PositiveMapfile = "${pre}pos_sample_mapfile.txt"
+        NegativeMapfile = "${pre}neg_sample_mapfile.txt"
+        MethodsTable    = "${pre}_methods.tsv"
+    }
+}
+
+
+function Test-MzMLComplete {
+    <# $true if the mzML ends with its closing tag (a killed msconvert leaves it open). #>
+    param([Parameter(Mandatory=$true)][string]$Path)
+    try {
+        $fs = [System.IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite')
+        try {
+            $n = [Math]::Min(4096, $fs.Length)
+            if ($n -le 0) { return $false }
+            $null = $fs.Seek(-$n, 'End')
+            $buf = New-Object byte[] $n
+            $null = $fs.Read($buf, 0, $n)
+            $tail = [System.Text.Encoding]::ASCII.GetString($buf)
+            return ($tail -match '</indexedmzML>\s*$' -or $tail -match '</mzML>\s*$')
+        } finally { $fs.Close() }
+    } catch { return $false }
+}
+
+
+function Get-PendingConversions {
+    <#
+    .SYNOPSIS
+        Returns the RAW files that do not yet have a complete mzML. Incomplete
+        mzML files (e.g. from a timed-out msconvert) are deleted and reconverted.
+    #>
+    param(
+        [Parameter(Mandatory=$true)] [AllowEmptyCollection()] [string[]]$RawFiles,
+        [Parameter(Mandatory=$true)] [string]$MzMLDirectory,
+        [Parameter(Mandatory=$true)] [string]$FileType
+    )
+    Write-Host ""
+    Write-Host "Checking for existing $FileType conversions..." -ForegroundColor Cyan
+    if (!(Test-Path -LiteralPath $MzMLDirectory)) {
+        New-Item -ItemType Directory -Path $MzMLDirectory -Force | Out-Null
+        return $RawFiles
+    }
+    $existing = @{}
+    foreach ($mz in (Get-ChildItem -LiteralPath $MzMLDirectory -Filter "*.mzML" -File -ErrorAction SilentlyContinue)) {
+        $existing[$mz.BaseName.ToLower()] = $mz.FullName
+    }
+    $pending = @(); $skipped = 0; $incomplete = 0
+    foreach ($rawFile in $RawFiles) {
+        $key = [System.IO.Path]::GetFileNameWithoutExtension($rawFile).ToLower()
+        if ($existing.ContainsKey($key)) {
+            if (Test-MzMLComplete -Path $existing[$key]) { $skipped++; continue }
+            Remove-Item -LiteralPath $existing[$key] -Force -ErrorAction SilentlyContinue
+            $incomplete++
+        }
+        $pending += $rawFile
+    }
+    Write-Host "Already converted (skipping): $skipped" -ForegroundColor Green
+    if ($incomplete -gt 0) { Write-Host "Incomplete mzML removed for reconversion: $incomplete" -ForegroundColor Yellow }
+    Write-Host "Pending conversion: $($pending.Count)" -ForegroundColor Yellow
+    return $pending
+}
+
+
+function Compare-MapfileToConverted {
+    <#
+    .SYNOPSIS
+        Compares mapfile entries against converted mzML files to find missing files.
+    .DESCRIPTION
+        Reads the mapfile, extracts File.Name column, compares against mzML files
+        in the output directory, and reports files present in mapfile but missing
+        from converted files.
+    #>
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$MapfilePath,
+        
+        [Parameter(Mandatory=$true)]
+        [string]$MzMLDirectory,
+        
+        [Parameter(Mandatory=$true)]
+        [string]$OutputPath,
+        
+        [Parameter(Mandatory=$true)]
+        [string]$StudyID,
+        
+        [Parameter(Mandatory=$true)]
+        [string]$ModeName
+    )
+    
+    Write-Host ""
+    Write-Host "Comparing $ModeName mapfile to converted files..." -ForegroundColor Cyan
+    
+    if (!(Test-Path $MapfilePath)) {
+        Write-Host "  Mapfile not found: $MapfilePath" -ForegroundColor Yellow
+        return $null
+    }
+    
+    if (!(Test-Path $MzMLDirectory)) {
+        Write-Host "  mzML directory not found: $MzMLDirectory" -ForegroundColor Yellow
+        return $null
+    }
+    
+    # Read mapfile (tab-separated, skip header)
+    $mapfileContent = Get-Content $MapfilePath | Select-Object -Skip 1
+    $mapfileNames = @()
+    
+    foreach ($line in $mapfileContent) {
+        $fields = $line -split "`t"
+        if ($fields.Count -gt 0 -and $fields[0]) {
+            # Extract base name without extension
+            $baseName = [System.IO.Path]::GetFileNameWithoutExtension($fields[0])
+            $mapfileNames += $baseName
+        }
+    }
+    
+    Write-Host "  Files in mapfile: $($mapfileNames.Count)"
+    
+    # Get converted mzML files
+    $convertedFiles = Get-ChildItem -Path $MzMLDirectory -Filter "*.mzML" -File -ErrorAction SilentlyContinue
+    $convertedNames = New-Object System.Collections.Generic.HashSet[string]
+    
+    foreach ($mzml in $convertedFiles) {
+        [void]$convertedNames.Add($mzml.BaseName.ToLower())
+    }
+    
+    Write-Host "  Converted mzML files: $($convertedNames.Count)"
+    
+    # Find missing files
+    $missingFiles = @()
+    
+    foreach ($name in $mapfileNames) {
+        if (-not $convertedNames.Contains($name.ToLower())) {
+            $missingFiles += $name
+        }
+    }
+    
+    # Write missing files report
+    $missingReportPath = Join-Path $OutputPath "${StudyID}_${ModeName}_missing_files.txt"
+    
+    if ($missingFiles.Count -gt 0) {
+        Write-Host "  MISSING FILES: $($missingFiles.Count)" -ForegroundColor Red
+        
+        $reportLines = @("# Missing files for $ModeName")
+        $reportLines += "# Files present in mapfile but not found in converted mzML"
+        $reportLines += "# Generated: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+        $reportLines += ""
+        $reportLines += $missingFiles
+        
+        $reportLines | Out-File -FilePath $missingReportPath -Encoding UTF8
+        Write-Host "  Missing files report: $missingReportPath" -ForegroundColor Yellow
+    } else {
+        Write-Host "  All mapfile entries have been converted" -ForegroundColor Green
+        
+        # Write empty/success report
+        $reportLines = @("# No missing files for $ModeName")
+        $reportLines += "# All $($mapfileNames.Count) files in mapfile have been converted"
+        $reportLines += "# Verified: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+        
+        $reportLines | Out-File -FilePath $missingReportPath -Encoding UTF8
+    }
+    
+    return @{
+        MapfileCount = $mapfileNames.Count
+        ConvertedCount = $convertedNames.Count
+        MissingCount = $missingFiles.Count
+        MissingFiles = $missingFiles
+        ReportPath = $missingReportPath
+    }
+}
+
+
+function New-LCMethodReports {
+    <#
+    .SYNOPSIS
+        One instrument method report per distinct method (MS1 and MSMS), using the
+        methods table built from the sequence (one representative RAW per method;
+        these are the only RAW files read outside msconvert).
+        Report script pulled from GitHub. Non-fatal.
+    #>
+    param(
+        [Parameter(Mandatory=$true)]  [string]$MethodsTable,
+        [Parameter(Mandatory=$true)]  [string]$OutputPath,
+        [Parameter(Mandatory=$true)]  [string]$StudyID,
+        [Parameter(Mandatory=$true)]  [string]$LCMode,
+        [Parameter(Mandatory=$true)]  [string]$ScriptUrl,
+        [Parameter(Mandatory=$false)] [string]$PythonExe = "python"
+    )
+    Write-Host ""
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host "Generating $LCMode Instrument Method Reports" -ForegroundColor Cyan
+    Write-Host "========================================" -ForegroundColor Cyan
+    try {
+        if (!(Test-Path -LiteralPath $MethodsTable)) {
+            Write-Host "WARNING: methods table not found; skipping method reports." -ForegroundColor Yellow
+            return $null
+        }
+        $methods = @(Import-Csv -LiteralPath $MethodsTable -Delimiter "`t")
+        if ($methods.Count -eq 0) { Write-Host "WARNING: no methods found." -ForegroundColor Yellow; return $null }
+        Write-Host "Distinct methods in the sequence files: $($methods.Count)"
+
+        $reportDir = Join-Path $OutputPath "2-Method_Report"
+        if (!(Test-Path -LiteralPath $reportDir)) { New-Item -ItemType Directory -Path $reportDir -Force | Out-Null }
+
+        try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+        $scriptPath = Join-Path $env:TEMP "instrument_method_report.py"
+        try {
+            Write-Host "Pulling report script from: $ScriptUrl"
+            Invoke-WebRequest -Uri $ScriptUrl -OutFile $scriptPath -UseBasicParsing -ErrorAction Stop
+        } catch {
+            if (!(Test-Path $scriptPath) -or ((Get-Item $scriptPath).Length -lt 1000)) {
+                Write-Host "WARNING: Could not download method report script: $($_.Exception.Message)" -ForegroundColor Yellow
+                return $null
+            }
+            Write-Host "  download failed; using cached copy $scriptPath" -ForegroundColor DarkGray
+        }
+
+        $summary = @("Method`tCategory`tPolarity`tInjections`tSampleTypes`tRepresentativeFile`tReport")
+        $made = 0
+        foreach ($m in $methods) {
+            if (-not $m.Representative) {
+                Write-Host "  [SKIP] $($m.Method) (no RAW file yet)" -ForegroundColor DarkGray
+                continue
+            }
+            $pyOut  = & $PythonExe $scriptPath $m.Representative $reportDir 2>&1
+            $pyExit = $LASTEXITCODE
+            $repBase   = [System.IO.Path]::GetFileNameWithoutExtension($m.Representative)
+            $generated = Join-Path $reportDir "${repBase}_method_report.txt"
+            if ($pyExit -eq 0 -and (Test-Path -LiteralPath $generated)) {
+                $reportName = "${StudyID}_$($m.Method)_method_report.txt"
+                Move-Item -LiteralPath $generated -Destination (Join-Path $reportDir $reportName) -Force
+                $made++
+                $summary += "$($m.Method)`t$($m.Category)`t$($m.Polarity)`t$($m.Injections)`t$($m.SampleTypes)`t$repBase`t$reportName"
+                Write-Host "  [OK] $($m.Method)" -ForegroundColor Green
+            } else {
+                Write-Host "  [FAIL] $($m.Method) (exit $pyExit)" -ForegroundColor Yellow
+                if ($pyOut) { Write-Host "         $($pyOut -join ' ')" -ForegroundColor DarkGray }
+            }
+        }
+        if ($made -gt 0) {
+            $summaryPath = Join-Path $reportDir "${StudyID}_${LCMode}_method_summary.txt"
+            [System.IO.File]::WriteAllLines($summaryPath, [string[]]$summary, $Utf8NoBom)
+            Write-Host "Generated $made method report(s) in: $reportDir" -ForegroundColor Green
+        }
+        return $reportDir
+    } catch {
+        Write-Host "WARNING: Method report step error: $($_.Exception.Message)" -ForegroundColor Yellow
+        return $null
+    }
+}
+
+
+function Convert-RawFilesParallel {
+    <#
+    .SYNOPSIS
+        Converts RAW files to mzML in parallel using msconvert.
+    .DESCRIPTION
+        Launches multiple msconvert processes simultaneously for improved throughput.
+        Includes comprehensive error handling, timeout protection, and logging.
+    #>
+    param(
+        [Parameter(Mandatory=$true)]
+        [string[]]$RawFiles,
+        
+        [Parameter(Mandatory=$true)]
+        [string]$OutputDirectory,
+        
+        [Parameter(Mandatory=$true)]
+        [string]$MSConvertPath,
+        
+        [Parameter(Mandatory=$false)]
+        [int]$MaxJobs = 6,
+        
+        [Parameter(Mandatory=$true)]
+        [string]$StudyID,
+        
+        [Parameter(Mandatory=$true)]
+        [string]$FileType,
+        
+        [Parameter(Mandatory=$false)]
+        [string]$OutputFormat = "--mzML",
+        
+        [Parameter(Mandatory=$false)]
+        [string]$Compression = "--zlib",
+        
+        [Parameter(Mandatory=$false)]
+        [bool]$WriteIndex = $true,
+        
+        [Parameter(Mandatory=$false)]
+        [ValidateSet("32", "64")]
+        [string]$BinaryEncodingPrecision = "64",
+        
+        [Parameter(Mandatory=$false)]
+        [bool]$EnableCentroiding = $false,
+        
+        [Parameter(Mandatory=$false)]
+        [int]$TimeoutMinutes = 10,
+        
+        [Parameter(Mandatory=$true)]
+        [string]$LogDirectory
+    )
+    
+    Write-Host ""
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host "Converting $FileType Files" -ForegroundColor Cyan
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host "Output: $OutputDirectory"
+    Write-Host "Parallel jobs: $MaxJobs"
+    Write-Host "Files to convert: $($RawFiles.Count)"
+    
+    if ($RawFiles.Count -eq 0) {
+        Write-Host "No files to convert." -ForegroundColor Yellow
+        return @{ Successful = @(); Failed = @() }
+    }
+    
+    # Create output directory
+    if (!(Test-Path $OutputDirectory)) {
+        New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
+    }
+    
+    # Initialize tracking
+    $successful = [System.Collections.ArrayList]::new()
+    $failed = [System.Collections.ArrayList]::new()
+    $activeJobs = @{}
+    $fileQueue = [System.Collections.Queue]::new()
+    
+    foreach ($file in $RawFiles) {
+        $fileQueue.Enqueue($file)
+    }
+    
+    $totalFiles = $RawFiles.Count
+    $processedCount = 0
+    $startTime = Get-Date
+    
+    # Main processing loop
+    while ($fileQueue.Count -gt 0 -or $activeJobs.Count -gt 0) {
+        
+        # Check completed jobs
+        $completedJobIds = @()
+        
+        foreach ($jobId in $activeJobs.Keys) {
+            $job = Get-Job -Id $jobId -ErrorAction SilentlyContinue
+            
+            if ($null -eq $job) {
+                $completedJobIds += $jobId
+                continue
+            }
+            
+            $jobInfo = $activeJobs[$jobId]
+            $elapsed = (Get-Date) - $jobInfo.StartTime
+            
+            if ($job.State -in @('Completed', 'Failed', 'Stopped')) {
+                $rawFile = $jobInfo.RawFile
+                $fileName = [System.IO.Path]::GetFileName($rawFile)
+                
+                # Check for output file
+                $expectedOutput = Join-Path $OutputDirectory ([System.IO.Path]::GetFileNameWithoutExtension($rawFile) + ".mzML")
+                
+                if ($job.State -eq 'Completed' -and (Test-Path -LiteralPath $expectedOutput) -and (Test-MzMLComplete -Path $expectedOutput)) {
+                    [void]$successful.Add(@{
+                        File = $rawFile
+                        Time = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                        Duration = $elapsed.TotalSeconds
+                    })
+                    $duration = [math]::Round($elapsed.TotalSeconds, 1)
+                    Write-Host "  [OK] $fileName (${duration}s)" -ForegroundColor Green
+                } else {
+                    $errorMsg = "Conversion failed or output not found"
+                    try {
+                        # v2.4: the job's thrown error (msconvert message / timeout) is in the error stream
+                        $jerr = $null
+                        $jobOutput = Receive-Job -Job $job -ErrorAction SilentlyContinue -ErrorVariable jerr
+                        if ($jerr) { $errorMsg = (($jerr | ForEach-Object { $_.ToString() }) -join ' ').Trim() }
+                        elseif ($jobOutput -and ("$jobOutput" -ne "Success")) { $errorMsg = $jobOutput | Out-String }
+                        elseif ($job.State -eq 'Completed') { $errorMsg = "msconvert finished but the mzML is missing or incomplete" }
+                    } catch {}
+                    
+                    # v2.4: never leave a partial mzML behind (it would be skipped on the next run)
+                    Remove-Item -LiteralPath $expectedOutput -Force -ErrorAction SilentlyContinue
+                    [void]$failed.Add(@{
+                        File = $rawFile
+                        Time = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                        Error = $errorMsg.Substring(0, [Math]::Min(500, $errorMsg.Length))
+                    })
+                    Write-Host "  [FAIL] $fileName - $errorMsg" -ForegroundColor Red
+                }
+                
+                Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+                $completedJobIds += $jobId
+                $processedCount++
+            }
+            elseif ($TimeoutMinutes -gt 0 -and $elapsed.TotalMinutes -gt ($TimeoutMinutes + 2)) {
+                # Backstop only: the job itself kills msconvert at TimeoutMinutes (v2.4)
+                $rawFile = $jobInfo.RawFile
+                $fileName = [System.IO.Path]::GetFileName($rawFile)
+                
+                Stop-Job -Job $job -ErrorAction SilentlyContinue
+                Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+                $partial = Join-Path $OutputDirectory ([System.IO.Path]::GetFileNameWithoutExtension($rawFile) + ".mzML")
+                Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
+                
+                [void]$failed.Add(@{
+                    File = $rawFile
+                    Time = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                    Error = "Timeout after $TimeoutMinutes minutes"
+                })
+                Write-Host "  [TIMEOUT] $fileName" -ForegroundColor Yellow
+                
+                $completedJobIds += $jobId
+                $processedCount++
+            }
+        }
+        
+        # Remove completed jobs from tracking
+        foreach ($jobId in $completedJobIds) {
+            $activeJobs.Remove($jobId)
+        }
+        
+        # Start new jobs if capacity available
+        while ($activeJobs.Count -lt $MaxJobs -and $fileQueue.Count -gt 0) {
+            $rawFile = $fileQueue.Dequeue()
+            $fileName = [System.IO.Path]::GetFileName($rawFile)
+            
+            $job = Start-Job -ScriptBlock {
+                param($exePath, $inputFile, $outputDir, $formatArg, $compressionArg, $doCentroid, $doWriteIndex, $bitPrecision, $timeoutMin)
+                
+                # Build argument string with all options
+                $argString = "`"$inputFile`" -o `"$outputDir`" $formatArg $compressionArg"
+                
+                # Add --noindex if WriteIndex is disabled (index is written by default)
+                if (-not $doWriteIndex) {
+                    $argString += " --noindex"
+                }
+                
+                # Add binary encoding precision (--32 or --64)
+                $argString += " --$bitPrecision"
+                
+                # Add centroiding filter if enabled
+                if ($doCentroid) {
+                    $argString += " --filter `"peakPicking vendor msLevel=1-`""
+                }
+                
+                $processInfo = New-Object System.Diagnostics.ProcessStartInfo
+                $processInfo.FileName = $exePath
+                $processInfo.Arguments = $argString
+                $processInfo.RedirectStandardOutput = $true
+                $processInfo.RedirectStandardError = $true
+                $processInfo.UseShellExecute = $false
+                $processInfo.CreateNoWindow = $true
+                
+                $process = New-Object System.Diagnostics.Process
+                $process.StartInfo = $processInfo
+                $process.Start() | Out-Null
+                # v2.4: read both streams asynchronously (a full pipe buffer can hang
+                # msconvert) and kill msconvert itself on timeout
+                $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+                $stderrTask = $process.StandardError.ReadToEndAsync()
+                $waitMs = if ($timeoutMin -gt 0) { [int]($timeoutMin * 60000) } else { -1 }
+                if (-not $process.WaitForExit($waitMs)) {
+                    try { $process.Kill() } catch {}
+                    $process.WaitForExit(30000) | Out-Null
+                    $partial = Join-Path $outputDir ([System.IO.Path]::GetFileNameWithoutExtension($inputFile) + ".mzML")
+                    Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
+                    throw "Timeout after $timeoutMin minutes (msconvert stopped)"
+                }
+                $process.WaitForExit()
+                
+                if ($process.ExitCode -ne 0) {
+                    # msconvert writes most errors to stdout (e.g. "[RawFileImpl::ctor()] Corrupt RAW file ...");
+                    # keep the error lines, without the file path
+                    $lines = ("$($stderrTask.Result)`n$($stdoutTask.Result)" -split "`r?`n") |
+                             Where-Object { $_ -match '(?i)error|corrupt|exception|fail|^\s*\[' }
+                    $msg = (($lines | Select-Object -First 3) -join ' | ').Replace($inputFile, '<file>')
+                    if (-not $msg) { $msg = "$($stdoutTask.Result)".Trim() }
+                    if ($msg.Length -gt 400) { $msg = $msg.Substring(0, 400) + "..." }
+                    throw "msconvert failed (exit $($process.ExitCode)): $msg"
+                }
+                
+                return "Success"
+                
+            } -ArgumentList $MSConvertPath, $rawFile, $OutputDirectory, $OutputFormat, $Compression, $EnableCentroiding, $WriteIndex, $BinaryEncodingPrecision, $TimeoutMinutes
+            
+            $activeJobs[$job.Id] = @{
+                RawFile = $rawFile
+                StartTime = Get-Date
+            }
+            
+            Write-Host "  [START] $fileName (Job $($job.Id))"
+        }
+        
+        # Progress update
+        if ($processedCount -gt 0) {
+            $elapsed = (Get-Date) - $startTime
+            $avgTime = $elapsed.TotalSeconds / $processedCount
+            $remaining = ($totalFiles - $processedCount) * $avgTime / $MaxJobs
+            $pct = [math]::Round(($processedCount / $totalFiles) * 100, 1)
+            
+            Write-Progress -Activity "Converting $FileType" `
+                          -Status "$processedCount of $totalFiles ($pct%) - ~$([math]::Round($remaining/60, 1)) min remaining" `
+                          -PercentComplete $pct
+        }
+        
+        Start-Sleep -Milliseconds 500
+    }
+    
+    Write-Progress -Activity "Converting $FileType" -Completed
+    
+    # Write logs
+    $successLogPath = Join-Path $LogDirectory "${StudyID}_${FileType}_conversion_success.txt"
+    $failureLogPath = Join-Path $LogDirectory "${StudyID}_${FileType}_conversion_failures.txt"
+    
+    if ($successful.Count -gt 0) {
+        $successLines = @("File`tTimestamp`tDuration_sec")
+        foreach ($item in $successful) {
+            $successLines += "$($item.File)`t$($item.Time)`t$($item.Duration)"
+        }
+        $successLines | Out-File -FilePath $successLogPath -Encoding UTF8
+    }
+    
+    if ($failed.Count -gt 0) {
+        $failLines = @("File`tTimestamp`tError")
+        foreach ($item in $failed) {
+            $failLines += "$($item.File)`t$($item.Time)`t$($item.Error)"
+        }
+        $failLines | Out-File -FilePath $failureLogPath -Encoding UTF8
+    }
+    
+    # Summary
+    $totalTime = (Get-Date) - $startTime
+    Write-Host ""
+    Write-Host "$FileType Conversion Summary:" -ForegroundColor Cyan
+    Write-Host "  Successful: $($successful.Count)" -ForegroundColor Green
+    if ($failed.Count -gt 0) {
+        Write-Host "  Failed: $($failed.Count)" -ForegroundColor Red
+    } else {
+        Write-Host "  Failed: $($failed.Count)" -ForegroundColor Green
+    }
+    Write-Host "  Total time: $([math]::Round($totalTime.TotalMinutes, 1)) minutes"
+    
+    return @{
+        Successful = $successful
+        Failed = $failed
+    }
+}
+
+
+#===============================================================================
+# MAIN EXECUTION
+#===============================================================================
+
+Write-Host ""
+Write-Host "========================================================================" -ForegroundColor Cyan
+Write-Host "       LC-HRMS Parallel msconvert - Standard Study Layout               " -ForegroundColor Cyan
+Write-Host "                           Version $ScriptVersion                                  " -ForegroundColor Cyan
+Write-Host "                   CLUES Lab, Emory University                         " -ForegroundColor Cyan
+Write-Host "========================================================================" -ForegroundColor Cyan
+Write-Host ""
+
+Write-Host "Validating configuration..." -ForegroundColor Yellow
+$placeholders = @("StudyFolderName", "StudyID", "OutputDirectory", "RawFilesRoot") |
+                Where-Object { "$($config[$_])" -match '<[A-Z_]+>' -and -not ($_ -eq "RawFilesRoot" -and $config.StudyPaths.Count -gt 0) }
+if (-not $MapfileOnly -and "$($config.MSConvertPath)" -match '<[A-Z_]+>') { $placeholders += "MSConvertPath" }
+if ($placeholders) {
+    Write-Host "ERROR: Set these values in `$config (or on the command line): $($placeholders -join ', ')" -ForegroundColor Red
+    exit 1
+}
+if (-not $MapfileOnly -and !(Test-Path -LiteralPath $config.MSConvertPath)) {
+    Write-Host "ERROR: msconvert.exe not found at: $($config.MSConvertPath)" -ForegroundColor Red
+    exit 1
+}
+if (!(Test-Path -LiteralPath $config.OutputDirectory)) {
+    New-Item -ItemType Directory -Path $config.OutputDirectory -Force | Out-Null
+}
+$transcribing = $false
+if ($config.WriteRunLog) {
+    $logPath = Join-Path $config.OutputDirectory ("$($config.StudyID)_conversion_log_{0}.txt" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
+    try { Start-Transcript -LiteralPath $logPath | Out-Null; $transcribing = $true } catch {}
+}
+
+# Resolve every LC mode before doing any work
+$lcPaths = @{}
+foreach ($lcMode in $config.LCModes) {
+    try { $lcPaths[$lcMode] = Resolve-LCStudyPaths -Config $config -LCMode $lcMode }
+    catch {
+        Write-Host "ERROR ($lcMode): $($_.Exception.Message)" -ForegroundColor Red
+        if ($transcribing) { Stop-Transcript | Out-Null }
+        exit 1
+    }
+}
+$resolvedMapfileScript = Get-MapfileScript -Url $config.MapfileScriptUrl -LocalPath $config.MapfileScript
+if (-not $resolvedMapfileScript) {
+    Write-Host "ERROR: lc_sequence_mapfile.py is not available (download failed and no local copy at $($config.MapfileScript))." -ForegroundColor Red
+    if ($transcribing) { Stop-Transcript | Out-Null }
+    exit 1
+}
+$config.MapfileScript = $resolvedMapfileScript
+if (-not (Get-Command $config.PythonExe -ErrorAction SilentlyContinue)) {
+    Write-Host "ERROR: Python ('$($config.PythonExe)') not found; it is needed to build the mapfiles." -ForegroundColor Red
+    if ($transcribing) { Stop-Transcript | Out-Null }
+    exit 1
+}
+
+Write-Host ""
+Write-Host "Configuration:" -ForegroundColor Green
+Write-Host "  Study: $($config.StudyID) ($($config.StudyFolderName))"
+Write-Host "  LC Modes: $($config.LCModes -join ', ')"
+foreach ($lcMode in $config.LCModes) {
+    Write-Host "    $lcMode -> $($lcPaths[$lcMode].Instrument): $($lcPaths[$lcMode].BasePath)"
+}
+Write-Host "  Output: $($config.OutputDirectory)"
+Write-Host "  Mapfiles: from sequence files (lc_sequence_mapfile.py)   Excluded sample types: $($config.ExcludeSampleTypes -join ', ')"
+if ($MapfileOnly) {
+    Write-Host "  Mode: mapfiles only (no conversion)" -ForegroundColor Yellow
+} else {
+    Write-Host "  msconvert: $($config.MSConvertPath)"
+    Write-Host "  Parallel Jobs: $($config.MaxParallelJobs)   Timeout: $($config.TimeoutMinutes) min"
+    Write-Host "  Centroiding: $(if ($config.EnableCentroiding) { 'Enabled (vendor peak picking)' } else { 'Disabled (as acquired)' })"
+    Write-Host "  Write Index: $(if ($config.WriteIndex) { 'Enabled' } else { 'Disabled' })   Binary Encoding: $($config.BinaryEncodingPrecision)-bit"
+}
+
+$allResults = [ordered]@{}
+foreach ($lcMode in $config.LCModes) {
+    Write-Host ""
+    Write-Host "================================================================================" -ForegroundColor Magenta
+    Write-Host "Processing $lcMode Mode" -ForegroundColor Magenta
+    Write-Host "================================================================================" -ForegroundColor Magenta
+
+    $paths = $lcPaths[$lcMode]
+    $lcOutputDir = Join-Path $config.OutputDirectory $lcMode
+    $mzmlDir = Join-Path $lcOutputDir "1a-${lcMode}_mzML"
+    # MSMS mzML go in a subfolder of the MS1 folder (e.g. 1a-HILIC_mzML\HILIC_MSMS). MS1
+    # listings here and in 6-Data_Extraction are not recursive, so the two never mix.
+    $msmsDir = Join-Path $mzmlDir "${lcMode}_MSMS"
+    if (!(Test-Path -LiteralPath $lcOutputDir)) { New-Item -ItemType Directory -Path $lcOutputDir -Force | Out-Null }
+
+    #---------------------------------------------------------------------------
+    # STEP 1: Mapfiles and conversion list from the sequence files
+    #---------------------------------------------------------------------------
+    $mapfileResult = Invoke-SequenceMapfile -Config $config -Paths $paths -LCMode $lcMode -OutputPath $lcOutputDir
+    if ($null -eq $mapfileResult) {
+        $allResults[$lcMode] = @{ Error = "mapfile step failed" }
+        continue
+    }
+    $fileResult = @{ RawFiles = $mapfileResult.RawFiles; MSMSFiles = $mapfileResult.MSMSFiles }
+
+    #---------------------------------------------------------------------------
+    # STEP 1b: Instrument method reports (non-fatal)
+    #---------------------------------------------------------------------------
+    if ($config.GenerateMethodReport -and $mapfileResult -and $mapfileResult.MethodsTable) {
+        $null = New-LCMethodReports -MethodsTable $mapfileResult.MethodsTable -OutputPath $lcOutputDir `
+            -StudyID $config.StudyID -LCMode $lcMode -ScriptUrl $config.MethodReportScriptUrl -PythonExe $config.PythonExe
+    }
+
+    $rawResult = @{ Successful = @(); Failed = @() }
+    $msmsResult = @{ Successful = @(); Failed = @() }
+    if (-not $MapfileOnly) {
+        #-----------------------------------------------------------------------
+        # STEP 2: Pending conversions (skips complete mzML; redoes incomplete ones)
+        #-----------------------------------------------------------------------
+        $pendingRawFiles = @($fileResult.RawFiles)
+        $pendingMSMSFiles = @($fileResult.MSMSFiles)
+        if ($config.SkipExisting) {
+            if ($pendingRawFiles.Count -gt 0) {
+                $pendingRawFiles = @(Get-PendingConversions -RawFiles $pendingRawFiles -MzMLDirectory $mzmlDir -FileType "${lcMode}_RAW")
+            }
+            if ($pendingMSMSFiles.Count -gt 0) {
+                $pendingMSMSFiles = @(Get-PendingConversions -RawFiles $pendingMSMSFiles -MzMLDirectory $msmsDir -FileType "${lcMode}_MSMS")
+            }
+        }
+
+        #-----------------------------------------------------------------------
+        # STEP 3: Convert MS1 and MSMS files
+        #-----------------------------------------------------------------------
+        Write-Host ""
+        Write-Host "$lcMode files to convert: RAW $($pendingRawFiles.Count), MSMS $($pendingMSMSFiles.Count)" -ForegroundColor Yellow
+        $convArgs = @{
+            MSConvertPath = $config.MSConvertPath; MaxJobs = $config.MaxParallelJobs; StudyID = $config.StudyID
+            OutputFormat = $config.OutputFormat; Compression = $config.Compression; WriteIndex = $config.WriteIndex
+            BinaryEncodingPrecision = $config.BinaryEncodingPrecision; EnableCentroiding = $config.EnableCentroiding
+            TimeoutMinutes = $config.TimeoutMinutes; LogDirectory = $lcOutputDir
+        }
+        if ($pendingRawFiles.Count -gt 0) {
+            $rawResult = Convert-RawFilesParallel -RawFiles $pendingRawFiles -OutputDirectory $mzmlDir -FileType "${lcMode}_RAW" @convArgs
+        }
+        if ($pendingMSMSFiles.Count -gt 0) {
+            $msmsResult = Convert-RawFilesParallel -RawFiles $pendingMSMSFiles -OutputDirectory $msmsDir -FileType "${lcMode}_MSMS" @convArgs
+        }
+
+        #-----------------------------------------------------------------------
+        # STEP 4: Every mapfile entry has an mzML?
+        #-----------------------------------------------------------------------
+        if ($mapfileResult) {
+            foreach ($pm in @(@("pos", $mapfileResult.PositiveMapfile), @("neg", $mapfileResult.NegativeMapfile))) {
+                if ($pm[1] -and (Test-Path -LiteralPath $pm[1])) {
+                    $null = Compare-MapfileToConverted -MapfilePath $pm[1] -MzMLDirectory $mzmlDir `
+                        -OutputPath $lcOutputDir -StudyID $config.StudyID -ModeName "${lcMode}$($pm[0])"
+                }
+            }
+        }
+    }
+    $allResults[$lcMode] = @{ RawResult = $rawResult; MSMSResult = $msmsResult; MapfileResult = $mapfileResult }
+}
+
+#===============================================================================
+# FINAL SUMMARY
+#===============================================================================
+Write-Host ""
+Write-Host "================================================================================" -ForegroundColor Cyan
+Write-Host "FINAL SUMMARY" -ForegroundColor Cyan
+Write-Host "================================================================================" -ForegroundColor Cyan
+$exitCode = 0
+foreach ($lcMode in $allResults.Keys) {
+    $r = $allResults[$lcMode]
+    Write-Host ""
+    Write-Host "$lcMode Mode:" -ForegroundColor Yellow
+    if ($r.Error) { Write-Host "  ERROR: $($r.Error)" -ForegroundColor Red; $exitCode = 1; continue }
+    Write-Host "  RAW - Success: $($r.RawResult.Successful.Count), Failed: $($r.RawResult.Failed.Count)"
+    Write-Host "  MSMS - Success: $($r.MSMSResult.Successful.Count), Failed: $($r.MSMSResult.Failed.Count)"
+    if ($r.RawResult.Failed.Count + $r.MSMSResult.Failed.Count -gt 0) { $exitCode = 1 }
+    $qc = Join-Path (Join-Path $config.OutputDirectory $lcMode) "$($config.StudyID)_${lcMode}_mapfile_QC.txt"
+    if (Test-Path -LiteralPath $qc) {
+        $w = Get-Content -LiteralPath $qc | Select-String -Pattern '^WARNINGS:|^  - ' | ForEach-Object { $_.Line }
+        $w | Select-Object -First 12 | ForEach-Object { Write-Host "  $_" }
+        Write-Host "  QC report: $qc"
+    }
+}
+Write-Host ""
+Write-Host "Output directory: $($config.OutputDirectory)" -ForegroundColor Green
+Write-Host ""
+Write-Host "Done." -ForegroundColor Green
+if ($transcribing) { Stop-Transcript | Out-Null }
+exit $exitCode

@@ -1,12 +1,25 @@
 # thermo-raw-method-report
 
-Helper scripts for the CLUES file-conversion workflow. The conversion scripts pull them from this repo at run time.
+This repo holds the CLUES LC-HRMS conversion driver and the helper scripts that the conversion scripts pull from it at run time.
 
 | Script | Purpose | Requires |
 |--------|---------|----------|
+| `LC-HRMS_parallel_msconvert_v2.4.ps1` | LC-HRMS conversion driver: it finds the study folder, builds the mapfiles from the sequence files, writes the method reports and converts the RAW files to mzML in parallel. The same script is in [HighResolutionExposomics_Workflow/5-File_Conversion/LC-HRMS](https://github.com/CLUES-Emory/HighResolutionExposomics_Workflow/tree/main/5-File_Conversion/LC-HRMS), whose README has the full documentation. | PowerShell 5.1+, ProteoWizard msconvert, Python 3.8+ |
 | `instrument_method_report.py` | Extracts the instrument method from one `.raw` file into a formatted report (see below). | [`fisher_py`](https://pypi.org/project/fisher_py/) |
 | `lc_sequence_mapfile.py` | Builds the LC-HRMS sample mapfiles, the list of files to convert, the methods table and a QC report from the Xcalibur **sequence files**. It does not open `.raw` files (see below). Used by `LC-HRMS_parallel_msconvert_v2.4.ps1`. | Python standard library |
 | `mapfile_crosscheck.py` | Cross-checks a sequence-derived sample mapfile against the metadata embedded in the `.raw` files, and writes a raw-derived mapfile and a report of discrepancies and batch order. Used by LC-HRMS v2.3. Usage: `python mapfile_crosscheck.py <raw_dir_or_filelist> <sequence_mapfile> <output_prefix>` | [`fisher_py`](https://pypi.org/project/fisher_py/) |
+
+## LC-HRMS_parallel_msconvert_v2.4.ps1
+
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process
+cd <this repo>
+# check the mapfiles and QC report first, then rerun without -MapfileOnly (add -MSConvertPath)
+.\LC-HRMS_parallel_msconvert_v2.4.ps1 -StudyFolderName CLU0000_YYMMDD_NAME -StudyID CLU0000 `
+    -OutputDirectory "D:\path\to\output" -LCModes HILIC,C18 -RawFilesRoot "R:\<USERNAME>\1-RAW Files" -MapfileOnly
+```
+
+The driver downloads `lc_sequence_mapfile.py` and `instrument_method_report.py` from this repo (`main`) at run time. If the mapfile script can't be downloaded, it uses the copy next to the driver, which is in this repo. MSMS mzML go to `1a-<LC>_mzML\<LC>_MSMS\`.
 
 ## lc_sequence_mapfile.py
 
