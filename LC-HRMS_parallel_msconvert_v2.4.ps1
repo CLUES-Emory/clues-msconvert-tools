@@ -23,7 +23,7 @@
     instrument_method_report.py (method reports; optional).
 
 .NOTES
-    Script Version: 2.4
+    Script Version: 2.4.1
     Author: CLUES Lab, Emory University
 
     Version History:
@@ -65,6 +65,11 @@
             * QC report, per-row sequence check and a run log are written.
             The msconvert settings and conversion engine are unchanged from v2.3.
             Developed with Claude Opus 5.5 via Claude Code.
+    - v2.4.1 (2026-11-08): Method reports also as JSON
+            (<ID>_<method>_method_report.json) and one summary of all methods per
+            LC mode (2-Method_Report\<ID>_<LC>_method_summary.json). The reports now
+            include the LC gradient (binary-pump methods were not read before) and
+            the dual-column setup. Conversion and mapfiles unchanged.
 
     Requirements: Windows PowerShell 5.1+, ProteoWizard msconvert, Python 3.8+
     (standard library for the mapfiles; fisher_py for the method reports only).
@@ -553,6 +558,11 @@ function New-LCMethodReports {
             if ($pyExit -eq 0 -and (Test-Path -LiteralPath $generated)) {
                 $reportName = "${StudyID}_$($m.Method)_method_report.txt"
                 Move-Item -LiteralPath $generated -Destination (Join-Path $reportDir $reportName) -Force
+                # Same content as JSON (report script 2026-11-08 and later); read by the summary below
+                $generatedJson = Join-Path $reportDir "${repBase}_method_report.json"
+                if (Test-Path -LiteralPath $generatedJson) {
+                    Move-Item -LiteralPath $generatedJson -Destination (Join-Path $reportDir "${StudyID}_$($m.Method)_method_report.json") -Force
+                }
                 $made++
                 $summary += "$($m.Method)`t$($m.Category)`t$($m.Polarity)`t$($m.Injections)`t$($m.SampleTypes)`t$repBase`t$reportName"
                 Write-Host "  [OK] $($m.Method)" -ForegroundColor Green
@@ -565,6 +575,13 @@ function New-LCMethodReports {
             $summaryPath = Join-Path $reportDir "${StudyID}_${LCMode}_method_summary.txt"
             [System.IO.File]::WriteAllLines($summaryPath, [string[]]$summary, $Utf8NoBom)
             Write-Host "Generated $made method report(s) in: $reportDir" -ForegroundColor Green
+            # All methods in one JSON (methods table + each report's JSON + dual-column pairing)
+            $sumOut  = & $PythonExe $scriptPath --summary $MethodsTable $reportDir $StudyID $LCMode 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "  $($sumOut -join ' ')" -ForegroundColor Green
+            } else {
+                Write-Host "WARNING: method summary JSON not written (exit $LASTEXITCODE): $($sumOut -join ' ')" -ForegroundColor Yellow
+            }
         }
         return $reportDir
     } catch {

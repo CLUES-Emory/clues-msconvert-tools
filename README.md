@@ -204,7 +204,7 @@ Each setting can be set in the `$config` block at the top of the script. The one
 | `<ID>_<LC>_sequence_check.tsv` | Every sequence row (status, matched RAW file, flags) and every RAW file not used |
 | `<ID>_<LC>_conversion_manifest.tsv` | The RAW files to convert |
 | `<ID>_<LC>_methods.tsv` | Distinct methods and their representative RAW files |
-| `2-Method_Report\` | One `<ID>_<method>_method_report.txt` per method, plus `<ID>_<LC>_method_summary.txt` |
+| `2-Method_Report\` | One `<ID>_<method>_method_report.txt` and `.json` per method, plus `<ID>_<LC>_method_summary.txt` (table) and `<ID>_<LC>_method_summary.json` (every method's report, and how the methods pair up on the dual-column system) |
 | `<ID>_<LC>{pos,neg}_missing_files.txt` | Mapfile entries with no mzML |
 | `<ID>_<LC>_{RAW,MSMS}_conversion_{success,failures}.txt` | Conversion logs for this run, including msconvert's error lines |
 | `<ID>_<LC>_mapfile_summary.json` | A machine-readable summary |
@@ -226,6 +226,8 @@ The mapfile is built from the sequence files, as described under [lc_sequence_ma
 The distinct methods, MS1 and MSMS, come from the sequence's `Instrument Method` column. For each, the first listed RAW file that will be converted is the representative, and `instrument_method_report.py` is run on it. A method with no RAW file yet is skipped until a later run. The reports are rebuilt on every run.
 
 Methods are told apart by file name only. A method edited mid-study but saved under the same name gets one report, from its first injection.
+
+**Dual-column LC.** The CLUES 5-min methods run on two columns that alternate: the method names carry the column channel (`…_Ch1-5min` for C18pos, `…_Ch2-5min` for C18neg). Each injection is separated during the MS data window (0–5 min); for the rest of its LC program (5–10 min) that column is washed and re-equilibrated while the valve sends the other column's injection to the MS. The reports state this when the method name has a channel and the LC program runs past the data window, and `<ID>_<LC>_method_summary.json` lists the MS1 methods of each channel (`lc_system`).
 
 ### Re-running
 
@@ -304,7 +306,7 @@ This script extracts the **instrument method** from a Thermo `.raw` file and wri
 | **LC-MS** (e.g. Orbitrap Exploris 120) | LC method / Autosampler / Column oven (TCC) | ESI source |
 | **GC-HRMS** (Orbitrap Exploris GC) | GC inlet + oven program / TriPlus RSH autosampler | EI source |
 
-The report includes File, Instrument and Sample information, the full method detail for each component, and a **Quick Reference** block of the key parameters.
+The report includes File, Instrument and Sample information, the full method detail for each component, and a **Quick Reference** block of the key parameters. For LC methods it includes the gradient program (binary pumps `%A1/%B1` and quaternary pumps `%A`–`%D`; a warning is printed when a step can't be read), the MS data window, the length of the LC program and the column channel.
 
 **Requires** `fisher_py` (setup step 4).
 
@@ -313,7 +315,13 @@ python instrument_method_report.py <raw_file> <output_dir>
 python instrument_method_report.py "C:\data\<prefix>_001.raw" "C:\reports"
 ```
 
-The report is written to `<output_dir>\<raw_basename>_method_report.txt` (UTF-8, so `°C` and `µL` render correctly). You can also set `raw_file` and `output_dir` near the top of the script and run it with no arguments; command-line arguments take precedence.
+The report is written to `<output_dir>\<raw_basename>_method_report.txt` (UTF-8, so `°C` and `µL` render correctly), and the same content to `<raw_basename>_method_report.json` (values as printed in the method; gradient steps as numbers).
+
+The LC-HRMS driver then merges the JSON reports of one LC mode (no `fisher_py` needed for this step):
+
+```powershell
+python instrument_method_report.py --summary <ID>_<LC>_methods.tsv <report_dir> <ID> <LC>   # writes <report_dir>\<ID>_<LC>_method_summary.json
+``` You can also set `raw_file` and `output_dir` near the top of the script and run it with no arguments; command-line arguments take precedence.
 
 ---
 
@@ -356,5 +364,5 @@ This repo was renamed from `thermo-raw-method-report`. GitHub redirects the old 
 ## Tests
 
 ```powershell
-python -m unittest discover -s tests -v     # lc_sequence_mapfile.py; no RAW files or network needed
+python -m unittest discover -s tests -v     # lc_sequence_mapfile.py and the method-report parsers; no RAW files, fisher_py or network needed
 ```
