@@ -25,9 +25,12 @@ def raw(rel, mtime=OLD):
 
 
 def row(fn, sid="S", stype="Study_Sample", comment="1", method="260702_HILICpos_Ch1-5min", path=P + "Batch_01",
-        csvn="S_01_260820_HILIC.csv"):
-    return (csvn, 0, {"File Name": fn, "Sample ID": sid, "Comment": comment, "Sample Name": stype,
-                      "Instrument Method": "C:\\Xcalibur\\methods\\" + method, "Path": path})
+        csvn="S_01_260820_HILIC.csv", inj=None):
+    r = {"File Name": fn, "Sample ID": sid, "Comment": comment, "Sample Name": stype,
+         "Instrument Method": "C:\\Xcalibur\\methods\\" + method, "Path": path}
+    if inj is not None:
+        r["Inj Vol"] = inj
+    return (csvn, 0, r)
 
 
 def run(files, seq, **kw):
@@ -136,6 +139,17 @@ class KindsAndExclusions(unittest.TestCase):
         mt = sm.methods_table(rows)
         self.assertEqual(len(mt), 1)
         self.assertEqual((mt[0]["Injections"], mt[0]["RepresentativeFile"]), (2, "N_HILICpos_002"))
+        self.assertEqual((mt[0]["InjVol"], mt[0]["InjVolCounts"]), ("", ""))   # no Inj Vol column
+
+    def test_methods_table_injection_volume(self):
+        # blanks at 0 uL come first; the method's volume is the most common non-zero value
+        seq = [row("N_HILICpos_001", stype="Blank", inj="0"), row("N_HILICpos_002", inj="7.50"),
+               row("N_HILICpos_003", inj="7.5"), row("N_HILICpos_004", stype="Blank", inj="0"),
+               row("N_HILICpos_005", stype="Blank", inj="0")]
+        rows, _, _ = run([], seq)
+        mt = sm.methods_table(rows)
+        self.assertEqual((mt[0]["InjVol"], mt[0]["InjVolCounts"]), ("7.5", "0 x3; 7.5 x2"))
+        self.assertEqual(rows[1]["Inj_Vol"], "7.5")
 
 
 class Helpers(unittest.TestCase):

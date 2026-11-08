@@ -1,0 +1,99 @@
+Orbitrap Exploris 120 Method Summary
+  
+Creator: THERMO-H6V9MA03\Thermo Scientific          Last Modified: 11/05/2025 21:05:17 by THERMO-H6V9MA03\Thermo Scientific
+  
+Global Settings
+	Use Static Source Gasses
+	Use Ion Source Settings from Tune = Not Checked
+	Collision Gas pressure (mTorr)= 1
+	Collision Gas Type = -1
+	Method Duration (min)= 5
+	Ion Source Type = H-ESI
+	Spray Voltage = Static
+	Spray Voltage: Positive Ion (V) = 2500
+	Spray Voltage: Negative Ion (V) = 1000
+	Gas Mode = Static
+	Sheath Gas (Arb) = 50
+	Infusion Mode (LC)= False
+	Aux Gas (Arb) = 10
+	Sweep Gas (Arb) = 1
+	Ion Transfer Tube Temp (°C) = 300
+	Vaporizer Temp (°C) = 325
+	APPI Lamp = Not in use
+	FAIMS Mode = Not Installed
+	Internal Mass Calibration = EASY-IC™
+	Mode = Scan-to-Scan
+	Application Mode = Small Molecule
+	Pressure Mode = Standard
+	Expected Peak Width (s) = 1
+	Mild Trapping = False
+Experiment 1
+	Experiment Name = MS
+	Start Time (min) = 0
+	End Time (min) = 5
+		
+
+
+		Scan MasterScan
+			Orbitrap Resolution = 60000
+			Scan Range (m/z) = 85-1000
+			Normalised AGC Target (%)= 200
+			Microscans = 1
+			RF Lens(%) = 70
+			Maximum Injection Time Mode = Auto
+			AGC Target = Custom
+			EASY-IC = On
+			DataType = Centroid
+			Polarity = Negative
+			Source Fragmentation = False
+			Scan Description = 
+
+		Filter IsotopeExclusionFilter
+			Isotope Exclusion = Assigned
+
+		Filter ApexDetection
+			Phase: Trigger Window (%) = 30
+
+		Filter TargetedExclusionMassList
+			Add Mass List Targets Determined by Xcalibur AcquireX = False
+			Mass list type = m/z
+			Include Intensity Threshold = False
+			Time Mode = Start/End Time
+			Mass tolerance = ppm
+			Mass tolerance Low = 5
+			Mass tolerance High = 5
+			Ignore charge state requirement for unassigned ions = True
+			Set Activation parameters per compound = False
+			Perform dependent scan on most intense ion if no targets are found = False
+>>>>>>>>>>>>> Mass List Table <<<<<<<<<<<<<<
+   CompoundName|            m/z|  t start (min)|   t stop (min)|
+               |        89.0245|              0|           0.11|
+               |       112.9856|              0|           0.11|
+               |       116.9286|              0|           0.11|
+>>>>>>>>>>>>> End Mass List Table <<<<<<<<<<<<<<
+
+		Data Dependent Properties
+			Data Dependent Mode= Number of Scans
+			Number of Dependent Scans= 4
+Scan Event 1
+		
+
+
+		Scan ddMSnScan
+			Isolation Window = Custom
+			Isolation Window (m/z) = 1
+			Multiplex Ions Enabled = False
+			Isolation Offset = Off
+			Maximum number of multiplexed ions = 0
+			Reported Mass = Offset Mass
+			Collision Energy Type = Normalized
+			HCD Collision Energies (%) = 20,40,60
+			Orbitrap Resolution = 15000
+			Microscans = 1
+			RF Lens(%) = 70
+			AGC Target = Standard
+			Maximum Injection Time Mode = Auto
+			EASY-IC = Off
+			DataType = Centroid
+			Source Fragmentation = False
+			Scan Description = 
