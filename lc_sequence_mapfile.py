@@ -48,7 +48,7 @@ Outputs (in --out-dir, normally <OutputDirectory>\\<LC>):
 Usage:
     python lc_sequence_mapfile.py --raw-dir <...\\1-Raw_Files> --seq-dir <...\\3-Sequence_Files>
         --out-dir <out> --study-id <ID> --lc-mode <HILIC|C18>
-        [--exclude-types MSMS,Cal_Std,PFAS-MSMS] [--min-age-minutes 15]
+        [--exclude-types MSMS,PFAS-MSMS,AMAP,PFAS_Spike,Cal_Std] [--min-age-minutes 15]
 
 Exit codes: 0 ok, 2 usage error, 3 no sequence rows found.
 """

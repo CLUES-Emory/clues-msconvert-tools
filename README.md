@@ -180,7 +180,7 @@ Each setting can be set in the `$config` block at the top of the script. The one
 | `TimeoutMinutes` | | 10 | Per-file limit; msconvert is stopped and its partial output removed |
 | `SkipExisting` | | `$true` | Skip files that already have a complete mzML |
 | `WriteIndex`, `BinaryEncodingPrecision`, `EnableCentroiding` | | `$true`, `"64"`, `$false` | msconvert output options (see setup step 2) |
-| `ExcludeSampleTypes` | | `MSMS, Cal_Std, PFAS-MSMS` | Sequence `Sample Name` values left out of the mapfiles; their files are still converted |
+| `ExcludeSampleTypes` | | `MSMS, PFAS-MSMS, AMAP, PFAS_Spike, Cal_Std` | Sequence `Sample Name` values left out of the mapfiles; their files are still converted |
 | `SkipFilesNewerThanMinutes` | | 15 | RAW files modified more recently than this are converted on a later run |
 | `GenerateMethodReport` | | `$true` | One report per distinct method (needs `fisher_py`) |
 | `MapfileScriptUrl`, `MethodReportScriptUrl` | | this repo, `main` | Where the helpers are downloaded from; set `MapfileScriptUrl = ""` to use the local copy only |
@@ -288,7 +288,7 @@ This script builds the sample mapfiles for one LC mode of a study in the CLUES s
 ```powershell
 python lc_sequence_mapfile.py --raw-dir <...\1-Raw_Files> --seq-dir <...\3-Sequence_Files> `
     --out-dir <out> --study-id <ID> --lc-mode <HILIC|C18> `
-    [--exclude-types MSMS,Cal_Std,PFAS-MSMS] [--min-age-minutes 15]
+    [--exclude-types MSMS,PFAS-MSMS,AMAP,PFAS_Spike,Cal_Std] [--min-age-minutes 15]
 ```
 
 It writes the mapfiles and QC files listed in [Layout and output](#layout-and-output).

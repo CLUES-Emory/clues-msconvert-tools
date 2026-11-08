@@ -159,8 +159,8 @@ $config = @{
     # MAPFILE SETTINGS (mapfiles are built from the sequence CSVs)
     #---------------------------------------------------------------------------
     # Sample types (sequence "Sample Name") left out of the mapfiles. Their RAW files
-    # are still converted. Case-sensitive. e.g. @("MSMS", "Cal_Std", "PFAS-MSMS")
-    ExcludeSampleTypes = @("MSMS", "Cal_Std", "PFAS-MSMS")
+    # are still converted. Case-sensitive. e.g. @("MSMS", "PFAS-MSMS", "AMAP", "PFAS_Spike", "Cal_Std")
+    ExcludeSampleTypes = @("MSMS", "PFAS-MSMS", "AMAP", "PFAS_Spike", "Cal_Std")
 
     # RAW files modified less than this many minutes ago are treated as still being
     # acquired and are converted on a later run.
