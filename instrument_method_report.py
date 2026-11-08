@@ -186,6 +186,51 @@ LC_HEADER_PARAMS = [
 ]
 
 
+# Default solvents per LC mode and column channel (_Ch1 / _Ch2 in the method name). A solvent the
+# method file leaves as N/A (or blank) is replaced with the value here, and the report marks it as a
+# default. Values as written in the CLUES instrument methods, 2026-11 (Exploris 120 Charybdis, Scylla,
+# Ralph, Nancy). The instruments store about 40 characters per solvent, so the HILIC names are cut
+# short there; write the full composition here once confirmed.
+DEFAULT_SOLVENTS = {
+    ("C18", 1):   {"Solvent A1": "95:5 Acetonitrile/water, 0.1% FA",
+                   "Solvent B1": "0.1% FA in water"},                         # C18pos
+    ("C18", 2):   {"Solvent A1": "95:5 Acetonitrile/water",
+                   "Solvent B1": "5mM Ammonium acetate in water"},            # C18neg
+    ("HILIC", 1): {"Solvent A1": "10mM ammonium formate, 0.1% formic acid",
+                   "Solvent B1": "10mM ammonium formate, 0.1% formic acid"},  # HILICpos (cut in the method files)
+    ("HILIC", 2): {"Solvent A1": "10mM ammonium acetate, 0.1% ammonium",
+                   "Solvent B1": "10mM ammonium acetate, 0.1% ammonium"},     # HILICneg (cut in the method files)
+}
+
+
+def lc_mode_and_channel(method_file):
+    """('C18' | 'HILIC' | None, channel int | None) from the method name, e.g. 251027_C18pos_Ch1-5min."""
+    name = os.path.splitext(os.path.basename((method_file or "").replace("\\", "/")))[0]
+    mode = re.search(r"(C18|HILIC)", name, re.IGNORECASE)
+    ch = re.search(r"_Ch(\d+)", name)
+    return (mode.group(1).upper() if mode else None), (int(ch.group(1)) if ch else None)
+
+
+def apply_default_solvents(header, method_file):
+    """Replace N/A or missing Solvent A1/B1 in <header> with DEFAULT_SOLVENTS for the method's LC
+    mode and channel. Returns {slot: {"method_value": ..., "default": ...}} for each replacement."""
+    applied = {}
+    defaults = DEFAULT_SOLVENTS.get(lc_mode_and_channel(method_file))
+    if not defaults:
+        return applied
+    for slot, val in defaults.items():
+        cur = (header.get(slot) or "").strip()
+        if cur in ("", "N/A"):
+            applied[slot] = {"method_value": cur or None, "default": val}
+            header[slot] = val
+    if applied:   # keep the printed order of LC_HEADER_PARAMS
+        order = [n for n, _ in LC_HEADER_PARAMS]
+        items = sorted(header.items(), key=lambda kv: order.index(kv[0]) if kv[0] in order else len(order))
+        header.clear()
+        header.update(items)
+    return applied
+
+
 def parse_lc_header(method_text):
     """Column, solvents, pump, plumbing and MS data window of the LC method text, as printed.
     The unused slots (Column 2, Solvent A2/A3/B2/B3) are left out when they read N/A."""
@@ -267,13 +312,20 @@ def lc_column_setup(header, steps, method_file=None):
             "lc_program_min": pe, "dual_column": dual, "description": text}
 
 
-def format_lc_method(method_text, method_file=None):
+def format_lc_method(method_text, method_file=None, injection_volume=None):
     """Parse the LC method text into a clean, readable format."""
     result = []
     header = parse_lc_header(method_text)
+    applied = apply_default_solvents(header, method_file)
     for name, val in header.items():
         if name != "Method Comment":
-            result.append(f"  {name:<20} {val}")
+            note = ""
+            if name in applied:
+                mode, ch = lc_mode_and_channel(method_file)
+                note = f"   [default for {mode} channel {ch}; method file: {applied[name]['method_value'] or 'blank'}]"
+            result.append(f"  {name:<20} {val}{note}")
+    if injection_volume is not None:
+        result.append(f"  {'Injection Volume':<20} {injection_volume:g} uL   [from the sequence]")
     result.append("")
 
     steps, n_step_lines = parse_lc_gradient(method_text)
@@ -578,11 +630,19 @@ def quick_reference(all_method_text, method_texts, inst_type, lc=None):
             ("Column",                 r"Column 1:\s*(.+)"),
             ("Solvent A",              r"Loading Solvent A1:\s*(.+)"),
             ("Solvent B",              r"Loading Solvent B1:\s*(.+)"),
+            ("Injection Volume (uL)",  None),
             ("Column Temp",            r"Temp:\s*(\d+\s*Cdeg)"),
             ("Method Duration (min)",  r"Method Duration\s*\(min\)\s*=\s*(.+)"),
         ]
-        vals = [(n, find_param(all_method_text, p)) for n, p in lc_params]
+        vals = [(n, find_param(all_method_text, p) if p else None) for n, p in lc_params]
         if lc:
+            # header solvents (with the defaults for N/A) and the sequence injection volume
+            hdr = lc.get("header") or {}
+            iv = lc.get("injection_volume_ul")
+            vals = [(n, hdr.get("Solvent A1", v) if n == "Solvent A" else
+                        hdr.get("Solvent B1", v) if n == "Solvent B" else
+                        (f"{iv:g} (sequence)" if iv is not None else None) if n == "Injection Volume (uL)" else v)
+                    for n, v in vals]
             setup, steps = lc["column_setup"], lc["gradient"]
             ws, we = setup["data_window_start_min"], setup["data_window_end_min"]
             if steps and we is not None:
@@ -598,14 +658,16 @@ def quick_reference(all_method_text, method_texts, inst_type, lc=None):
     return [(g, [(n, v) for n, v in vals if v]) for g, vals in groups]
 
 
-def lc_front_end_json(method_text, method_file=None):
-    """LC front end (method 0) -> header, gradient, column setup, autosampler and TCC settings."""
+def lc_front_end_json(method_text, method_file=None, injection_volume=None):
+    """LC front end (method 0) -> header, gradient, column setup, autosampler and TCC settings.
+    injection_volume (uL) comes from the sequence (the driver passes the methods table's InjVol)."""
     lc_text = method_text.split("AUTOSAMPLER METHOD")[0]
     as_text, tcc_text = "", ""
     if "AUTOSAMPLER METHOD" in method_text:
         remainder = method_text.split("AUTOSAMPLER METHOD", 1)[1]
         as_text, _, tcc_text = remainder.partition("TCC:")
     header = parse_lc_header(lc_text)
+    applied = apply_default_solvents(header, method_file)
     steps, n_step_lines = parse_lc_gradient(lc_text)
 
     def lines_to_dict(lines):
@@ -618,6 +680,9 @@ def lc_front_end_json(method_text, method_file=None):
 
     return {
         "header": header,
+        "solvent_defaults_applied": applied,
+        "injection_volume_ul": injection_volume,
+        "injection_volume_source": "sequence" if injection_volume is not None else None,
         "gradient": steps,
         "gradient_steps_in_text": n_step_lines,
         "column_setup": lc_column_setup(header, steps, method_file),
@@ -628,8 +693,10 @@ def lc_front_end_json(method_text, method_file=None):
 
 # ── Report for one RAW file ───────────────────────────────────────────────────
 
-def build_report(raw_path):
-    """Read one RAW file with fisher_py; return (report lines, JSON dict)."""
+def build_report(raw_path, injection_volume=None):
+    """Read one RAW file with fisher_py; return (report lines, JSON dict).
+    injection_volume: the method's injection volume (uL) from the sequence, or None. The RAW file's own
+    value is that one injection's (the representative file is often a blank at 0 uL)."""
     from fisher_py import RawFile   # imported here so the parsers above load without fisher_py
 
     raw = RawFile(raw_path)
@@ -806,7 +873,7 @@ def build_report(raw_path):
                     as_text = remainder
 
             report.append(section_header("LC Method"))
-            report.extend(format_lc_method(lc_text, method_file))
+            report.extend(format_lc_method(lc_text, method_file, injection_volume))
 
             if as_text:
                 report.append(section_header("Autosampler Method"))
@@ -818,7 +885,7 @@ def build_report(raw_path):
                 report.extend(format_tcc_method(tcc_text))
                 report.append("")
 
-            lc = lc_front_end_json(method_text, method_file)
+            lc = lc_front_end_json(method_text, method_file, injection_volume)
             if lc["gradient_steps_in_text"] > len(lc["gradient"]):
                 print(f"WARNING: {os.path.basename(raw_path)}: {lc['gradient_steps_in_text']} gradient step(s) "
                       f"in the LC method, {len(lc['gradient'])} read", file=sys.stderr)
@@ -861,6 +928,13 @@ def build_report(raw_path):
 
 # ── Summary of all methods of one LC mode (standard library only) ─────────────
 
+def _float_or_none(s):
+    try:
+        return float(s)
+    except (TypeError, ValueError):
+        return None
+
+
 def write_method_summary(methods_tsv, report_dir, study_id, lc_mode):
     """Merge the per-method JSON reports listed in <methods_tsv> (lc_sequence_mapfile.py's
     methods table) into <report_dir>/<study_id>_<lc_mode>_method_summary.json."""
@@ -873,6 +947,8 @@ def write_method_summary(methods_tsv, report_dir, study_id, lc_mode):
                  "injections": int(r["Injections"]) if r.get("Injections", "").isdigit() else r.get("Injections"),
                  "sample_types": [s.strip() for s in (r.get("SampleTypes") or "").split(";") if s.strip()],
                  "representative_raw": r.get("Representative") or None,
+                 "injection_volume_ul": _float_or_none(r.get("InjVol")),
+                 "injection_volume_counts": r.get("InjVolCounts") or None,
                  "report_json": os.path.basename(rep) if os.path.exists(rep) else None}
         if os.path.exists(rep):
             with open(rep, encoding="utf-8") as fh:
@@ -939,6 +1015,15 @@ def main(argv):
         print(f"Method summary saved: {out}")
         return 0
 
+    injection_volume = None
+    if "--injection-volume" in argv:
+        i = argv.index("--injection-volume")
+        if i + 1 >= len(argv):
+            print("Usage: instrument_method_report.py <raw> <output_dir> [--injection-volume <uL>]")
+            return 2
+        injection_volume = _float_or_none(argv[i + 1])
+        argv = argv[:i] + argv[i + 2:]
+
     rf, od = raw_file, output_dir
     if len(argv) >= 3:
         rf, od = argv[1], argv[2]
@@ -951,7 +1036,7 @@ def main(argv):
     if not os.path.exists(od):
         os.makedirs(od)
 
-    report, data = build_report(rf)
+    report, data = build_report(rf, injection_volume)
     basename = os.path.splitext(os.path.basename(rf))[0]
     out_file = os.path.join(od, f"{basename}_method_report.txt")
     # --- Write (UTF-8 so ° and µ symbols survive) ---

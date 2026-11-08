@@ -41,7 +41,8 @@ Outputs (in --out-dir, normally <OutputDirectory>\\<LC>):
     <ID>_<LC>_sample_mapfile.txt         both polarities + Polarity, Seq_Order, Seq_File, Instrument_Method, RAW_Found
     <ID>_<LC>_sequence_check.tsv         every sequence row (status, RAW match, flags) + every unlisted RAW file
     <ID>_<LC>_conversion_manifest.tsv    RAW files to convert (RawPath, Kind, File.Name)
-    <ID>_<LC>_methods.tsv                distinct methods + one representative RAW file each
+    <ID>_<LC>_methods.tsv                distinct methods + one representative RAW file each, and the
+                                         injection volume from the sequence "Inj Vol" column
     <ID>_<LC>_mapfile_QC.txt             human-readable QC report
     <ID>_<LC>_mapfile_summary.json       machine-readable summary
 
@@ -62,7 +63,7 @@ import sys
 import time
 from collections import Counter, defaultdict
 
-VERSION = "2.4"
+VERSION = "2.4.1"
 
 BATCH_DIR_RE = re.compile(r"^batch[_\- ]?(\d+)", re.I)
 TS_SUFFIX_RE = re.compile(r"_(\d{14})$")          # Xcalibur rename of a repeated file name
@@ -74,7 +75,7 @@ MAPFILE_CORE = ["File.Name", "Sample.ID", "Batch", "Sample_type"]
 MAPFILE_EXTRA = ["Polarity", "Seq_Order", "Seq_File", "Instrument_Method", "RAW_Found"]
 CHECK_COLS = ["Source", "Seq_Order", "Seq_File", "Seq_Row", "Seq_File_Name", "File.Name", "Sample.ID", "Batch",
               "Sample_type", "Polarity", "Instrument_Method", "Seq_Path", "Kind", "In_Mapfile", "RAW_Found",
-              "Convert", "Status", "Flags", "RAW_RelPath", "RAW_Modified"]
+              "Convert", "Status", "Flags", "RAW_RelPath", "RAW_Modified", "Inj_Vol"]
 
 
 # ----------------------------------------------------------------------------
@@ -172,6 +173,15 @@ def fmt(v):
     if isinstance(v, float):
         return "%g" % v
     return str(v)
+
+
+def inj_vol(s):
+    """Sequence 'Inj Vol' as a string without trailing zeros ('7.50' -> '7.5'); '' when blank."""
+    s = (s or "").strip()
+    try:
+        return "%g" % float(s)
+    except ValueError:
+        return s
 
 
 def write_tsv(path, cols, data):
@@ -288,7 +298,7 @@ def build(files, seq_rows, lc_mode, exclude_types=(), min_age_minutes=15, now=No
             "Status": "; ".join(status), "Flags": ";".join(flags),
             "RAW_RelPath": raw["rel"] if raw else "", "RAW_Path": raw["path"] if raw else "",
             "RAW_Modified": dt.datetime.fromtimestamp(raw["mtime"]).strftime("%Y-%m-%d %H:%M:%S") if raw and raw["mtime"] else "",
-            "_batch_folder": raw["batch_folder"] if raw else "",
+            "_batch_folder": raw["batch_folder"] if raw else "", "Inj_Vol": inj_vol(r.get("Inj Vol", "")),
         })
 
     unlisted = []
@@ -317,8 +327,12 @@ def build(files, seq_rows, lc_mode, exclude_types=(), min_age_minutes=15, now=No
 
 
 def methods_table(rows):
-    """Distinct instrument methods (from the sequence) + the first listed RAW file that will be converted."""
-    meth = {}
+    """Distinct instrument methods (from the sequence) + the first listed RAW file that will be converted.
+
+    InjVol is the method's injection volume from the sequence 'Inj Vol' column: the most common
+    non-zero value over its rows (blanks are often run at 0). InjVolCounts lists every value with its
+    count, most common first, e.g. '7.5 x1150; 0 x8'. Both are '' when the sequence has no Inj Vol."""
+    meth, vols = {}, defaultdict(Counter)
     for r in rows:
         if not r["Instrument_Method"]:
             continue
@@ -326,13 +340,20 @@ def methods_table(rows):
         e = meth.setdefault(k, dict(Method=r["Instrument_Method"], Category=r["Kind"], Polarity=r["Polarity"],
                                     Injections=0, SampleTypes=set(), Representative="", RepresentativeFile=""))
         e["Injections"] += 1
+        if r.get("Inj_Vol"):
+            vols[k][r["Inj_Vol"]] += 1
         if r["Sample_type"]:
             e["SampleTypes"].add(r["Sample_type"])
         if not e["Representative"] and r["Convert"]:
             e["Representative"], e["RepresentativeFile"] = r["RAW_Path"], r["File.Name"]
     out = []
-    for e in meth.values():
+    for k, e in meth.items():
         e["SampleTypes"] = "; ".join(sorted(e["SampleTypes"]))
+        c = vols[k]
+        ranked = sorted(c.items(), key=lambda kv: (-kv[1], kv[0]))
+        nonzero = [v for v, _ in ranked if v not in ("0", "")]
+        e["InjVol"] = nonzero[0] if nonzero else (ranked[0][0] if ranked else "")
+        e["InjVolCounts"] = "; ".join(f"{v} x{n}" for v, n in ranked)
         out.append(e)
     return sorted(out, key=lambda e: (e["Category"], e["Method"]))
 
@@ -413,7 +434,7 @@ def qc_report(rows, unlisted, extra, methods, study_id, lc_mode, raw_dir, seq_di
     L.append("Instrument methods (from the sequence):")
     for e in methods:
         L.append(f"  {e['Category']:<5}{e['Polarity']:<5}{e['Method']:<50} n={e['Injections']:<5} "
-                 f"rep: {e['RepresentativeFile'] or '(no RAW file yet)'}")
+                 f"inj {e.get('InjVol') or '?':<5} rep: {e['RepresentativeFile'] or '(no RAW file yet)'}")
     L.append("")
 
     def listing(title, items, limit=150):
@@ -472,7 +493,7 @@ def main(argv=None):
             if r["Convert"]:
                 fh.write(f"{r['RAW_Path']}\t{r['Kind']}\t{r['File.Name']}\n")
     write_tsv(pre + "_methods.tsv", ["Method", "Category", "Polarity", "Injections", "SampleTypes",
-                                     "RepresentativeFile", "Representative"], methods)
+                                     "RepresentativeFile", "Representative", "InjVol", "InjVolCounts"], methods)
     L = qc_report(rows, unlisted, extra, methods, a.study_id, a.lc_mode, a.raw_dir, a.seq_dir)
     with open(pre + "_mapfile_QC.txt", "w", encoding="utf-8") as fh:
         fh.write("\n".join(L) + "\n")

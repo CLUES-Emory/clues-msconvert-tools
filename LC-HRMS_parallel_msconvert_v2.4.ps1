@@ -69,7 +69,10 @@
             (<ID>_<method>_method_report.json) and one summary of all methods per
             LC mode (2-Method_Report\<ID>_<LC>_method_summary.json). The reports now
             include the LC gradient (binary-pump methods were not read before) and
-            the dual-column setup. Conversion and mapfiles unchanged.
+            the dual-column setup. The injection volume is taken from the sequence
+            (Inj Vol, most common non-zero value per method), and solvents the method
+            file leaves as N/A are filled from the report script's DEFAULT_SOLVENTS
+            table (per LC mode and column channel). Conversion and mapfiles unchanged.
 
     Requirements: Windows PowerShell 5.1+, ProteoWizard msconvert, Python 3.8+
     (standard library for the mapfiles; fisher_py for the method reports only).
@@ -201,7 +204,7 @@ if ($PSBoundParameters.ContainsKey('C18Path'))   { $config.C18Path   = $C18Path 
 if ($MSConvertPath)   { $config.MSConvertPath   = $MSConvertPath }
 if ($PythonExe)       { $config.PythonExe       = $PythonExe }
 
-$ScriptVersion = "2.4"
+$ScriptVersion = "2.4.1"
 $Utf8NoBom = New-Object System.Text.UTF8Encoding $false
 
 #===============================================================================
@@ -544,14 +547,18 @@ function New-LCMethodReports {
             Write-Host "  download failed; using cached copy $scriptPath" -ForegroundColor DarkGray
         }
 
-        $summary = @("Method`tCategory`tPolarity`tInjections`tSampleTypes`tRepresentativeFile`tReport")
+        $summary = @("Method`tCategory`tPolarity`tInjections`tSampleTypes`tInjVol`tRepresentativeFile`tReport")
         $made = 0
         foreach ($m in $methods) {
             if (-not $m.Representative) {
                 Write-Host "  [SKIP] $($m.Method) (no RAW file yet)" -ForegroundColor DarkGray
                 continue
             }
-            $pyOut  = & $PythonExe $scriptPath $m.Representative $reportDir 2>&1
+            # Injection volume from the sequence (methods table InjVol); the representative RAW is
+            # often a blank injected at 0 uL, so its own value is not the method's
+            $pyArgs = @($scriptPath, $m.Representative, $reportDir)
+            if ("$($m.InjVol)".Trim()) { $pyArgs += @("--injection-volume", "$($m.InjVol)".Trim()) }
+            $pyOut  = & $PythonExe @pyArgs 2>&1
             $pyExit = $LASTEXITCODE
             $repBase   = [System.IO.Path]::GetFileNameWithoutExtension($m.Representative)
             $generated = Join-Path $reportDir "${repBase}_method_report.txt"
@@ -564,7 +571,7 @@ function New-LCMethodReports {
                     Move-Item -LiteralPath $generatedJson -Destination (Join-Path $reportDir "${StudyID}_$($m.Method)_method_report.json") -Force
                 }
                 $made++
-                $summary += "$($m.Method)`t$($m.Category)`t$($m.Polarity)`t$($m.Injections)`t$($m.SampleTypes)`t$repBase`t$reportName"
+                $summary += "$($m.Method)`t$($m.Category)`t$($m.Polarity)`t$($m.Injections)`t$($m.SampleTypes)`t$($m.InjVol)`t$repBase`t$reportName"
                 Write-Host "  [OK] $($m.Method)" -ForegroundColor Green
             } else {
                 Write-Host "  [FAIL] $($m.Method) (exit $pyExit)" -ForegroundColor Yellow

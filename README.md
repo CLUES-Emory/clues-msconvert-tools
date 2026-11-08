@@ -203,7 +203,7 @@ Each setting can be set in the `$config` block at the top of the script. The one
 | `<ID>_<LC>_mapfile_QC.txt` | **Read this first.** Warnings, a per-CSV table, sample types, methods, rows with no RAW file, RAW files not converted, flagged rows |
 | `<ID>_<LC>_sequence_check.tsv` | Every sequence row (status, matched RAW file, flags) and every RAW file not used |
 | `<ID>_<LC>_conversion_manifest.tsv` | The RAW files to convert |
-| `<ID>_<LC>_methods.tsv` | Distinct methods and their representative RAW files |
+| `<ID>_<LC>_methods.tsv` | Distinct methods, their representative RAW files, and the injection volume from the sequence `Inj Vol` column (`InjVol`: most common non-zero value; `InjVolCounts`: every value with its count, e.g. `7.5 x1184; 0 x24`) |
 | `2-Method_Report\` | One `<ID>_<method>_method_report.txt` and `.json` per method, plus `<ID>_<LC>_method_summary.txt` (table) and `<ID>_<LC>_method_summary.json` (every method's report, and how the methods pair up on the dual-column system) |
 | `<ID>_<LC>{pos,neg}_missing_files.txt` | Mapfile entries with no mzML |
 | `<ID>_<LC>_{RAW,MSMS}_conversion_{success,failures}.txt` | Conversion logs for this run, including msconvert's error lines |
@@ -308,11 +308,15 @@ This script extracts the **instrument method** from a Thermo `.raw` file and wri
 
 The report includes File, Instrument and Sample information, the full method detail for each component, and a **Quick Reference** block of the key parameters. For LC methods it includes the gradient program (binary pumps `%A1/%B1` and quaternary pumps `%A`–`%D`; a warning is printed when a step can't be read), the MS data window, the length of the LC program and the column channel.
 
+**Injection volume.** The representative RAW file is usually the first injection of the method, which is often a blank at 0 µL, so its own injection volume is not the method's. The driver takes the method's volume from the sequence (`InjVol` in `<ID>_<LC>_methods.tsv`) and passes it with `--injection-volume`. The report shows it in the LC method and the Quick Reference as `[from the sequence]`, and the JSON has `lc.injection_volume_ul`. The Sample Information block still shows the representative file's own value.
+
+**Default solvents.** Some method files leave a solvent as `N/A` (the C18neg methods on Charybdis, for example, have no Solvent B). The `DEFAULT_SOLVENTS` table near the top of `instrument_method_report.py` lists Solvent A1 and B1 for each LC mode and column channel (C18 / HILIC, `_Ch1` / `_Ch2` in the method name). An `N/A` or blank solvent is replaced with that value and marked `[default for C18 channel 2; method file: N/A]`; the JSON lists the replacements under `lc.solvent_defaults_applied`. Solvents written in the method file are never changed. The instruments store about 40 characters per solvent, so the HILIC entries are as cut short in the method files; edit the table when the full compositions are confirmed.
+
 **Requires** `fisher_py` (setup step 4).
 
 ```powershell
-python instrument_method_report.py <raw_file> <output_dir>
-python instrument_method_report.py "C:\data\<prefix>_001.raw" "C:\reports"
+python instrument_method_report.py <raw_file> <output_dir> [--injection-volume <uL>]
+python instrument_method_report.py "C:\data\<prefix>_001.raw" "C:\reports" --injection-volume 7.5
 ```
 
 The report is written to `<output_dir>\<raw_basename>_method_report.txt` (UTF-8, so `°C` and `µL` render correctly), and the same content to `<raw_basename>_method_report.json` (values as printed in the method; gradient steps as numbers).
@@ -321,7 +325,11 @@ The LC-HRMS driver then merges the JSON reports of one LC mode (no `fisher_py` n
 
 ```powershell
 python instrument_method_report.py --summary <ID>_<LC>_methods.tsv <report_dir> <ID> <LC>   # writes <report_dir>\<ID>_<LC>_method_summary.json
-``` You can also set `raw_file` and `output_dir` near the top of the script and run it with no arguments; command-line arguments take precedence.
+```
+
+Each method in the summary also carries `injection_volume_ul` and `injection_volume_counts` from the methods table, so the volume is there even for a method with no report.
+
+You can also set `raw_file` and `output_dir` near the top of the script and run it with no arguments; command-line arguments take precedence.
 
 ---
 

@@ -108,13 +108,47 @@ class Json(unittest.TestCase):
         self.assertEqual(dict(qr["MS Scan Parameters"])["Polarity"], "Negative")
 
 
+class SolventsAndInjectionVolume(unittest.TestCase):
+    def test_na_solvent_replaced_with_channel_default(self):
+        lc = imr.lc_front_end_json(LC_NEG, METH_NEG)        # C18neg fixture: Solvent B1 N/A
+        self.assertEqual(lc["header"]["Solvent B1"], imr.DEFAULT_SOLVENTS[("C18", 2)]["Solvent B1"])
+        self.assertEqual(lc["solvent_defaults_applied"]["Solvent B1"]["method_value"], "N/A")
+        self.assertEqual(list(lc["header"])[:3], ["Column", "Solvent A1", "Solvent B1"])
+        text = "\n".join(imr.format_lc_method(LC_NEG, METH_NEG))
+        self.assertIn("[default for C18 channel 2; method file: N/A]", text)
+
+    def test_solvent_in_method_kept(self):
+        lc = imr.lc_front_end_json(LC_POS, METH_POS)
+        self.assertEqual(lc["solvent_defaults_applied"], {})
+        self.assertEqual(lc["header"]["Solvent B1"], "0.1% FA in water")
+
+    def test_no_default_without_mode_or_channel(self):
+        lc = imr.lc_front_end_json(LC_NEG, r"C:\methods\some_method.meth")
+        self.assertEqual((lc["header"]["Solvent B1"], lc["solvent_defaults_applied"]), ("N/A", {}))
+        self.assertEqual(imr.lc_mode_and_channel(METH_POS), ("C18", 1))
+        self.assertEqual(imr.lc_mode_and_channel("260702_HILICneg_Ch2-5min"), ("HILIC", 2))
+
+    def test_injection_volume_from_sequence(self):
+        lc = imr.lc_front_end_json(LC_NEG, METH_NEG, 10.0)
+        self.assertEqual((lc["injection_volume_ul"], lc["injection_volume_source"]), (10.0, "sequence"))
+        qr = dict(imr.quick_reference(LC_NEG + "\n" + MS_NEG, [LC_NEG, MS_NEG], "LC", lc))
+        lcq = dict(qr["LC Parameters"])
+        self.assertEqual(lcq["Injection Volume (uL)"], "10 (sequence)")
+        self.assertEqual(lcq["Solvent B"], imr.DEFAULT_SOLVENTS[("C18", 2)]["Solvent B1"])
+        self.assertIn("Injection Volume     10 uL   [from the sequence]",
+                      "\n".join(imr.format_lc_method(LC_NEG, METH_NEG, 10.0)))
+        lc0 = imr.lc_front_end_json(LC_NEG, METH_NEG)
+        self.assertNotIn("Injection Volume (uL)", dict(dict(imr.quick_reference(LC_NEG, [LC_NEG], "LC", lc0))["LC Parameters"]))
+
+
 class Summary(unittest.TestCase):
     def test_summary_pairs_channels(self):
         with tempfile.TemporaryDirectory() as d:
             tsv = os.path.join(d, "S_C18_methods.tsv")
             with open(tsv, "w", encoding="utf-8") as fh:
-                fh.write("Method\tCategory\tPolarity\tInjections\tSampleTypes\tRepresentativeFile\tRepresentative\n"
-                         "M_C18pos_Ch1-5min\tMS1\tpos\t10\tBlank; Study_Sample\tf1\tX:\\f1.raw\n"
+                fh.write("Method\tCategory\tPolarity\tInjections\tSampleTypes\tRepresentativeFile\tRepresentative"
+                         "\tInjVol\tInjVolCounts\n"
+                         "M_C18pos_Ch1-5min\tMS1\tpos\t10\tBlank; Study_Sample\tf1\tX:\\f1.raw\t7.5\t7.5 x8; 0 x2\n"
                          "M_C18neg_Ch2-5min\tMS1\tneg\t10\tBlank; Study_Sample\tf2\tX:\\f2.raw\n"
                          "M_C18neg_Ch2-5min_HRE_MSMS\tMSMS\tneg\t2\tMSMS\t\t\n")
             # neg: no method path in the report (sample information not readable) -> channel from the table
@@ -131,6 +165,9 @@ class Summary(unittest.TestCase):
         self.assertEqual(sorted(s["lc_system"]["channels"]), ["1", "2"])
         self.assertIn("channel 1: M_C18pos_Ch1-5min (pos)", s["lc_system"]["description"])
         self.assertIsNone(s["methods"][2]["report"])
+        self.assertEqual((s["methods"][0]["injection_volume_ul"], s["methods"][0]["injection_volume_counts"]),
+                         (7.5, "7.5 x8; 0 x2"))
+        self.assertIsNone(s["methods"][1]["injection_volume_ul"])
         self.assertEqual(s["methods"][1]["report"]["lc"]["column_setup"]["channel_from"], "methods table")
 
 
