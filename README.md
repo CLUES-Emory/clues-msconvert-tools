@@ -147,8 +147,13 @@ cd <folder with the driver>
     -HILICPath "R:\<USERNAME>\1-RAW Files\<date>-RawFiles_LC-<model>-<Instrument>\CLU0000_YYMMDD_NAME_HILIC" `
     -C18Path   "R:\<USERNAME>\1-RAW Files\<date>-RawFiles_LC-<model>-<Instrument>\CLU0000_YYMMDD_NAME_C18" -MapfileOnly
 
-# 2. Read <OutputDirectory>\<LC>\<StudyID>_<LC>_mapfile_QC.txt, then run the same command
-#    without -MapfileOnly (with MSConvertPath set in $config, or add -MSConvertPath "<path>")
+# 2. Read <OutputDirectory>\<LC>\<StudyID>_<LC>_mapfile_QC.txt, then run the full conversion
+#    (the same command without -MapfileOnly). -MSConvertPath can be left off if
+#    MSConvertPath is set in $config.
+.\LC-HRMS_parallel_msconvert_v2.4.ps1 -StudyID CLU0000 -OutputDirectory "D:\path\to\output" `
+    -HILICPath "R:\<USERNAME>\1-RAW Files\<date>-RawFiles_LC-<model>-<Instrument>\CLU0000_YYMMDD_NAME_HILIC" `
+    -C18Path   "R:\<USERNAME>\1-RAW Files\<date>-RawFiles_LC-<model>-<Instrument>\CLU0000_YYMMDD_NAME_C18" `
+    -MSConvertPath "C:\Users\<you>\AppData\Local\Apps\ProteoWizard 3.0.25345.6feda23 64-bit\msconvert.exe"
 ```
 
 **Study folders.** `HILICPath` and `C18Path` are the full paths of each mode's study folder, the one that holds `1-Raw_Files` and `3-Sequence_Files`. **Leave one blank to convert only the other mode.** On the command line, omit it, or pass `-HILICPath ""` to override a path set in `$config`. Nothing is searched for. Before any work starts, the script stops if:
